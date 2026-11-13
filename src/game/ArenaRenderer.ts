@@ -1,13 +1,17 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { ParsedMolecule } from '../chem/smilesEngine';
-import type {
-  ColorSchemeMode,
-  CombatEvent,
-  FighterState,
-  MatchState,
+import { buildArenaStage, type StageBuildResult } from './arenaEnvironments';
+import type { ArenaStageId } from './arenaStages';
+import {
+  FLOOR_Y,
+  getFighterBodyScale,
+  type ColorSchemeMode,
+  type CombatEvent,
+  type FighterState,
+  type MatchState,
+  type PowerUpType,
 } from './combatEngine';
-import { ARENA_HALF_WIDTH, FLOOR_Y } from './combatEngine';
 
 const _vec3A = new THREE.Vector3();
 const _vec3B = new THREE.Vector3();
@@ -62,77 +66,23 @@ function createRadialShadowTexture(): THREE.CanvasTexture {
   return tex;
 }
 
-function createDeckTexture(maxAnisotropy: number): THREE.CanvasTexture {
-  const w = 1024;
-  const h = 512;
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const ctx = c.getContext('2d')!;
-
-  ctx.fillStyle = '#071022';
-  ctx.fillRect(0, 0, w, h);
-
-  // Subtle radial arena spotlight gradient
-  const rad = ctx.createRadialGradient(w / 2, h / 2, 30, w / 2, h / 2, w * 0.48);
-  rad.addColorStop(0, 'rgba(56, 189, 248, 0.16)');
-  rad.addColorStop(0.6, 'rgba(15, 23, 42, 0.08)');
-  rad.addColorStop(1, 'rgba(4, 9, 20, 0)');
-  ctx.fillStyle = rad;
-  ctx.fillRect(0, 0, w, h);
-
-  // Hexagonal molecular lattice pattern
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.16)';
-  ctx.lineWidth = 1.5;
-  const r = 28;
-  const dx = r * 1.5;
-  const dy = r * Math.sqrt(3);
-  for (let col = -1; col < w / dx + 2; col++) {
-    for (let row = -1; row < h / dy + 2; row++) {
-      const cx = col * dx;
-      const cy = row * dy + (col % 2 === 0 ? 0 : dy / 2);
-      ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a = (i * Math.PI) / 3;
-        const px = cx + Math.cos(a) * (r * 0.86);
-        const py = cy + Math.sin(a) * (r * 0.86);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      }
-      ctx.closePath();
-      ctx.stroke();
-    }
-  }
-
-  // Center combat boundary lines
-  ctx.strokeStyle = 'rgba(125, 211, 252, 0.4)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(w / 2, 40);
-  ctx.lineTo(w / 2, h - 40);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(w / 2, h / 2, 110, 0, Math.PI * 2);
-  ctx.stroke();
-
-  // P1 & P2 corner markings
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(24, 24, w - 48, h - 48);
-
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = maxAnisotropy;
-  return tex;
-}
-
 type BondOrderCategory = 'single' | 'double' | 'triple' | 'aromatic';
 
 interface TaggedBond {
   mesh: THREE.Mesh;
   order: BondOrderCategory;
   heightNorm: number; // 0 (feet) .. 1 (head)
+}
+
+interface DecompPart {
+  mesh: THREE.Mesh;
+  restPos: THREE.Vector3;
+  restQuat: THREE.Quaternion;
+  restScale: THREE.Vector3;
+  scatterVel: THREE.Vector3;
+  spinAxis: THREE.Vector3;
+  spinSpeed: number;
+  delay: number;
 }
 
 interface FighterRig {
@@ -163,8 +113,13 @@ interface FighterRig {
   shadowMat: THREE.MeshBasicMaterial;
   taggedBonds: TaggedBond[];
   jointMats: THREE.MeshPhysicalMaterial[];
+  decompParts: DecompPart[];
+  decompTimer: number;
+  decompSparkTimer: number;
   weaponGroup: THREE.Group;
   weaponHaloMat: THREE.MeshBasicMaterial | null;
+  currentScale: number;
+  buffAuraTimer: number;
 }
 
 interface ParticleSlot {
@@ -177,6 +132,7 @@ interface ParticleSlot {
   vz: number;
   life: number;
   maxLife: number;
+  gravity: number;
   scale: number;
   r: number;
   g: number;
@@ -199,11 +155,12 @@ export class ArenaRenderer {
   private p1Rig: FighterRig;
   private p2Rig: FighterRig;
 
-  private dnaGroup: THREE.Group;
-  private mitoLeft: THREE.Group;
-  private mitoRight: THREE.Group;
-  private vesicleMesh: THREE.InstancedMesh;
-  private vesicleBase: Array<{ x: number; y: number; z: number; speed: number; phase: number; s: number }> = [];
+  private hemiLight!: THREE.HemisphereLight;
+  private keyLight!: THREE.DirectionalLight;
+  private p1Rim!: THREE.DirectionalLight;
+  private p2Rim!: THREE.DirectionalLight;
+  private activeStageId: ArenaStageId = 'cell';
+  private activeStage: StageBuildResult | null = null;
 
   private particleMesh: THREE.InstancedMesh;
   private particles: ParticleSlot[] = [];
@@ -215,11 +172,44 @@ export class ArenaRenderer {
   private currentState: 'title' | 'playing' | 'paused' | 'gameover' = 'title';
   private colorMode: ColorSchemeMode = 'elemental';
   private latestMatch: MatchState | null = null;
+  private p1Mol: ParsedMolecule | null = null;
+  private p2Mol: ParsedMolecule | null = null;
+  private projectileVisuals = new Map<number, { group: THREE.Group; trailTimer: number; ownerId: 1 | 2 }>();
+  private powerUpVisuals = new Map<
+    number,
+    {
+      group: THREE.Group;
+      core: THREE.Group;
+      ring: THREE.Mesh;
+      groundGlow: THREE.Mesh;
+      type: PowerUpType;
+    }
+  >();
+  private outroState: {
+    active: boolean;
+    stage: ArenaStageId;
+    winnerId: 1 | 2;
+    elapsed: number;
+    sparkTimer: number;
+    group: THREE.Group | null;
+    update: ((elapsed: number, dt: number, victorRig: FighterRig, victor: FighterState) => void) | null;
+  } = {
+    active: false,
+    stage: 'cell',
+    winnerId: 1,
+    elapsed: 0,
+    sparkTimer: 0,
+    group: null,
+    update: null,
+  };
+  private celebrationPhase: 'none' | 'round' | 'match' = 'none';
+  private celebrationWinner: 1 | 2 | 0 | null = null;
+  private victorySparkTimer = 0;
   private camX = 0;
-  private camY = 1.05;
-  private camZ = 13.8;
+  private camY = 1.15;
+  private camZ = 15.8;
   private lookX = 0;
-  private lookY = 0.25;
+  private lookY = 0.28;
 
   private resizeObserver: ResizeObserver;
 
@@ -246,10 +236,10 @@ export class ArenaRenderer {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x040914);
-    this.scene.fog = new THREE.FogExp2(0x050c1b, 0.025);
+    this.scene.fog = new THREE.FogExp2(0x050c1b, 0.021);
 
-    this.camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 120);
-    this.camera.position.set(0, 1.05, 13.8);
+    this.camera = new THREE.PerspectiveCamera(42, w / h, 0.1, 140);
+    this.camera.position.set(0, 1.15, 15.8);
 
     // Studio IBL environment map
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -257,11 +247,7 @@ export class ArenaRenderer {
     pmrem.dispose();
 
     this.setupLighting();
-    const { dnaGroup, mitoLeft, mitoRight, vesicleMesh } = this.buildBioArena();
-    this.dnaGroup = dnaGroup;
-    this.mitoLeft = mitoLeft;
-    this.mitoRight = mitoRight;
-    this.vesicleMesh = vesicleMesh;
+    this.setStage('cell');
 
     this.particleMesh = this.buildParticlePool();
     this.scene.add(this.particleMesh);
@@ -284,298 +270,61 @@ export class ArenaRenderer {
     this.resizeObserver.observe(container);
 
     this.lastTime = performance.now();
-    this.tick();
+    this.frameId = requestAnimationFrame(this.tick);
   }
 
   private setupLighting(): void {
-    const hemi = new THREE.HemisphereLight(0x7dd3fc, 0x090f20, 1.05);
-    this.scene.add(hemi);
+    this.hemiLight = new THREE.HemisphereLight(0x7dd3fc, 0x090f20, 1.05);
+    this.scene.add(this.hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff1dc, 2.0);
-    keyLight.position.set(4, 11, 8);
-    keyLight.castShadow = !this.isSoftwareGl;
-    keyLight.shadow.mapSize.set(1024, 1024);
-    keyLight.shadow.camera.left = -10;
-    keyLight.shadow.camera.right = 10;
-    keyLight.shadow.camera.top = 7;
-    keyLight.shadow.camera.bottom = -4;
-    keyLight.shadow.camera.near = 1;
-    keyLight.shadow.camera.far = 28;
-    keyLight.shadow.bias = -0.0005;
-    keyLight.shadow.normalBias = 0.02;
-    this.scene.add(keyLight);
+    this.keyLight = new THREE.DirectionalLight(0xfff1dc, 2.0);
+    this.keyLight.position.set(4, 12, 9);
+    this.keyLight.castShadow = !this.isSoftwareGl;
+    this.keyLight.shadow.mapSize.set(1024, 1024);
+    this.keyLight.shadow.camera.left = -13;
+    this.keyLight.shadow.camera.right = 13;
+    this.keyLight.shadow.camera.top = 8;
+    this.keyLight.shadow.camera.bottom = -4;
+    this.keyLight.shadow.camera.near = 1;
+    this.keyLight.shadow.camera.far = 32;
+    this.keyLight.shadow.bias = -0.0005;
+    this.keyLight.shadow.normalBias = 0.02;
+    this.scene.add(this.keyLight);
 
-    const p1Rim = new THREE.DirectionalLight(0x38bdf8, 1.15);
-    p1Rim.position.set(-8, 4, -5);
-    this.scene.add(p1Rim);
+    this.p1Rim = new THREE.DirectionalLight(0x38bdf8, 1.15);
+    this.p1Rim.position.set(-10, 4, -5);
+    this.scene.add(this.p1Rim);
 
-    const p2Rim = new THREE.DirectionalLight(0xf43f5e, 1.0);
-    p2Rim.position.set(8, 4, -5);
-    this.scene.add(p2Rim);
+    this.p2Rim = new THREE.DirectionalLight(0xf43f5e, 1.0);
+    this.p2Rim.position.set(10, 4, -5);
+    this.scene.add(this.p2Rim);
   }
 
-  private buildBioArena() {
-    const arenaGroup = new THREE.Group();
-    this.scene.add(arenaGroup);
+  public setStage(stageId: ArenaStageId): void {
+    if (this.activeStage && this.activeStageId === stageId) {
+      return;
+    }
+    if (this.activeStage) {
+      this.scene.remove(this.activeStage.group);
+      this.activeStage.dispose();
+      this.activeStage = null;
+    }
 
+    this.activeStageId = stageId;
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
-    const deckTex = createDeckTexture(maxAniso);
+    const built = buildArenaStage(stageId, this.isSoftwareGl, maxAniso);
+    this.activeStage = built;
+    this.scene.add(built.group);
 
-    // 1. Primary Combat Membrane Platform
-    const deckGeo = new THREE.BoxGeometry(15.6, 0.36, 4.6);
-    const deckMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: deckTex,
-      roughness: 0.34,
-      metalness: 0.45,
-    });
-    const deck = new THREE.Mesh(deckGeo, deckMat);
-    deck.position.set(0, FLOOR_Y - 0.18, 0);
-    deck.receiveShadow = !this.isSoftwareGl;
-    arenaGroup.add(deck);
-
-    // Lower hydrophobic core layer
-    const subDeckGeo = new THREE.BoxGeometry(15.2, 0.42, 4.1);
-    const subDeckMat = new THREE.MeshStandardMaterial({
-      color: 0x0b162c,
-      roughness: 0.65,
-      metalness: 0.25,
-    });
-    const subDeck = new THREE.Mesh(subDeckGeo, subDeckMat);
-    subDeck.position.set(0, FLOOR_Y - 0.58, 0);
-    arenaGroup.add(subDeck);
-
-    //Glowing perimeter neon rail
-    const railGeo = new THREE.BoxGeometry(15.72, 0.07, 4.72);
-    const railMat = new THREE.MeshStandardMaterial({
-      color: 0x0ea5e9,
-      emissive: 0x0284c7,
-      emissiveIntensity: 0.9,
-      roughness: 0.2,
-      metalness: 0.7,
-    });
-    const rail = new THREE.Mesh(railGeo, railMat);
-    rail.position.set(0, FLOOR_Y - 0.04, 0);
-    arenaGroup.add(rail);
-
-    // 2. Instanced Phospholipid Bilayer Heads & Hydrophobic Tails along front and back edge
-    const headCount = 34 * 4;
-    const headGeo = new THREE.SphereGeometry(0.14, 12, 12);
-    const headMat = new THREE.MeshPhysicalMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0369a1,
-      emissiveIntensity: 0.35,
-      roughness: 0.18,
-      metalness: 0.15,
-      clearcoat: 0.85,
-    });
-    const headMesh = new THREE.InstancedMesh(headGeo, headMat, headCount);
-
-    const tailGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.46, 6);
-    const tailMat = new THREE.MeshStandardMaterial({
-      color: 0x94a3b8,
-      roughness: 0.55,
-      metalness: 0.3,
-    });
-    const tailMesh = new THREE.InstancedMesh(tailGeo, tailMat, headCount * 2);
-
-    let hIdx = 0;
-    let tIdx = 0;
-    for (let i = 0; i < 34; i++) {
-      const x = -7.4 + (i / 33) * 14.8;
-      for (const zEdge of [2.15, -2.15]) {
-        for (const yLayer of [FLOOR_Y - 0.24, FLOOR_Y - 0.82]) {
-          _vec3A.set(x, yLayer, zEdge);
-          _quat.identity();
-          _scaleVec.set(1, 1, 1);
-          _mat4.compose(_vec3A, _quat, _scaleVec);
-          headMesh.setMatrixAt(hIdx++, _mat4);
-        }
-        // Two tails per lipid column
-        for (const tOff of [-0.045, 0.045]) {
-          _vec3A.set(x + tOff, FLOOR_Y - 0.53, zEdge);
-          _quat.setFromAxisAngle(_upVec, 0);
-          _scaleVec.set(1, 1, 1);
-          _mat4.compose(_vec3A, _quat, _scaleVec);
-          tailMesh.setMatrixAt(tIdx++, _mat4);
-        }
-      }
-    }
-    headMesh.instanceMatrix.needsUpdate = true;
-    headMesh.computeBoundingSphere();
-    tailMesh.instanceMatrix.needsUpdate = true;
-    tailMesh.computeBoundingSphere();
-    arenaGroup.add(headMesh);
-    arenaGroup.add(tailMesh);
-
-    // 3. Left & Right Transmembrane Ion-Channel Boundary Pillars
-    for (const side of [-1, 1]) {
-      const pillarGroup = new THREE.Group();
-      pillarGroup.position.set(side * (ARENA_HALF_WIDTH + 0.72), FLOOR_Y, 0);
-
-      const accentCol = side === -1 ? 0x38bdf8 : 0xf43f5e;
-      const baseMat = new THREE.MeshStandardMaterial({
-        color: 0x1e293b,
-        roughness: 0.4,
-        metalness: 0.65,
-      });
-      const glowMat = new THREE.MeshStandardMaterial({
-        color: accentCol,
-        emissive: accentCol,
-        emissiveIntensity: 0.85,
-        roughness: 0.2,
-        metalness: 0.3,
-      });
-
-      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 0.3, 12), baseMat);
-      base.position.y = 0.15;
-      pillarGroup.add(base);
-
-      // 4 alpha-helix barrel rods
-      for (let k = 0; k < 4; k++) {
-        const a = (k * Math.PI) / 2 + Math.PI / 4;
-        const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 3.2, 8), baseMat);
-        rod.position.set(Math.cos(a) * 0.24, 1.75, Math.sin(a) * 0.24);
-        pillarGroup.add(rod);
-      }
-
-      const ring1 = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.045, 10, 24), glowMat);
-      ring1.rotation.x = Math.PI / 2;
-      ring1.position.y = 1.2;
-      pillarGroup.add(ring1);
-
-      const ring2 = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.045, 10, 24), glowMat);
-      ring2.rotation.x = Math.PI / 2;
-      ring2.position.y = 2.6;
-      pillarGroup.add(ring2);
-
-      const cap = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), glowMat);
-      cap.position.y = 3.45;
-      pillarGroup.add(cap);
-
-      arenaGroup.add(pillarGroup);
-    }
-
-    // 4. Deep Background Vista: DNA Double Helix Monument
-    const dnaGroup = new THREE.Group();
-    dnaGroup.position.set(0, 1.4, -12.5);
-    const strandMatA = new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0284c7,
-      emissiveIntensity: 0.45,
-      roughness: 0.3,
-      metalness: 0.5,
-    });
-    const strandMatB = new THREE.MeshStandardMaterial({
-      color: 0xf43f5e,
-      emissive: 0xbe123c,
-      emissiveIntensity: 0.45,
-      roughness: 0.3,
-      metalness: 0.5,
-    });
-    const rungMat = new THREE.MeshStandardMaterial({
-      color: 0x94a3b8,
-      roughness: 0.45,
-      metalness: 0.5,
-    });
-
-    for (let i = -9; i <= 9; i++) {
-      const y = i * 0.52;
-      const theta = i * 0.48;
-      const rad = 1.15;
-      const x1 = Math.cos(theta) * rad;
-      const z1 = Math.sin(theta) * rad;
-      const x2 = -x1;
-      const z2 = -z1;
-
-      const s1 = new THREE.Mesh(this.sharedSphereGeo, strandMatA);
-      s1.scale.setScalar(0.16);
-      s1.position.set(x1, y, z1);
-      dnaGroup.add(s1);
-
-      const s2 = new THREE.Mesh(this.sharedSphereGeo, strandMatB);
-      s2.scale.setScalar(0.16);
-      s2.position.set(x2, y, z2);
-      dnaGroup.add(s2);
-
-      if (i % 2 === 0) {
-        _vec3A.set(x1, y, z1);
-        _vec3B.set(x2, y, z2);
-        const rung = this.makeBondMesh(_vec3A, _vec3B, 0.05, rungMat);
-        dnaGroup.add(rung);
-      }
-    }
-    this.scene.add(dnaGroup);
-
-    // 5. Left & Right 3D Mitochondria Organelles
-    const makeMito = (x: number, y: number, z: number, rotZ: number) => {
-      const mGroup = new THREE.Group();
-      mGroup.position.set(x, y, z);
-      mGroup.rotation.z = rotZ;
-
-      const shellMat = new THREE.MeshPhysicalMaterial({
-        color: 0xb45309,
-        emissive: 0x7c2d12,
-        emissiveIntensity: 0.25,
-        roughness: 0.35,
-        metalness: 0.15,
-        transparent: true,
-        opacity: 0.55,
-      });
-      const shell = new THREE.Mesh(new THREE.CapsuleGeometry(0.95, 2.2, 8, 16), shellMat);
-      shell.rotation.z = Math.PI / 2;
-      mGroup.add(shell);
-
-      const cristaeMat = new THREE.MeshStandardMaterial({
-        color: 0xf59e0b,
-        emissive: 0xd97706,
-        emissiveIntensity: 0.55,
-        roughness: 0.4,
-      });
-      for (let i = -3; i <= 3; i++) {
-        const fold = new THREE.Mesh(new THREE.TorusGeometry(0.58, 0.06, 8, 16), cristaeMat);
-        fold.rotation.y = Math.PI / 2;
-        fold.position.x = i * 0.45;
-        mGroup.add(fold);
-      }
-      this.scene.add(mGroup);
-      return mGroup;
-    };
-
-    const mitoLeft = makeMito(-10.4, 3.65, -9.8, 0.24);
-    const mitoRight = makeMito(10.4, 3.55, -9.8, -0.24);
-
-    // 6. Floating background vesicles / ribosomes (InstancedMesh)
-    const vCount = 32;
-    const vMat = new THREE.MeshStandardMaterial({
-      color: 0x38bdf8,
-      emissive: 0x0ea5e9,
-      emissiveIntensity: 0.3,
-      roughness: 0.25,
-      metalness: 0.3,
-      transparent: true,
-      opacity: 0.5,
-    });
-    const vesicleMesh = new THREE.InstancedMesh(this.sharedSphereGeo, vMat, vCount);
-    vesicleMesh.frustumCulled = false;
-
-    for (let i = 0; i < vCount; i++) {
-      const px = ((i * 73) % 28) - 14;
-      const py = ((i * 37) % 10) - 2.5;
-      const pz = -4.5 - ((i * 19) % 11);
-      const s = 0.08 + ((i * 13) % 10) * 0.018;
-      this.vesicleBase.push({
-        x: px,
-        y: py,
-        z: pz,
-        speed: 0.5 + (i % 5) * 0.18,
-        phase: i * 0.9,
-        s,
-      });
-    }
-    this.scene.add(vesicleMesh);
-
-    return { dnaGroup, mitoLeft, mitoRight, vesicleMesh };
+    this.scene.background = new THREE.Color(built.bgHex);
+    this.scene.fog = new THREE.FogExp2(built.fogHex, built.fogDensity);
+    this.hemiLight.color.setHex(built.hemiSkyHex);
+    this.hemiLight.groundColor.setHex(built.hemiGroundHex);
+    this.hemiLight.intensity = built.hemiIntensity;
+    this.keyLight.color.setHex(built.keyColorHex);
+    this.keyLight.intensity = built.keyIntensity;
+    this.p1Rim.color.setHex(built.rim1Hex);
+    this.p2Rim.color.setHex(built.rim2Hex);
   }
 
   private buildParticlePool(): THREE.InstancedMesh {
@@ -601,6 +350,7 @@ export class ArenaRenderer {
         vz: 0,
         life: 0,
         maxLife: 1,
+        gravity: 14,
         scale: 0,
         r: 1,
         g: 1,
@@ -625,7 +375,10 @@ export class ArenaRenderer {
     count: number,
     hexColor: number,
     speed: number,
-    scale = 1
+    scale = 1,
+    gravity = 14,
+    lifeBase = 0.28,
+    vyBias = 1.5
   ): void {
     _color.setHex(hexColor);
     for (let i = 0; i < count; i++) {
@@ -639,15 +392,30 @@ export class ArenaRenderer {
       slot.py = y;
       slot.pz = z;
       slot.vx = Math.cos(theta) * Math.cos(phi) * sp;
-      slot.vy = Math.sin(phi) * sp + 1.5;
+      slot.vy = Math.sin(phi) * sp + vyBias;
       slot.vz = Math.sin(theta) * Math.cos(phi) * sp * 0.5;
-      slot.maxLife = 0.28 + Math.random() * 0.28;
+      slot.maxLife = lifeBase + Math.random() * lifeBase;
       slot.life = slot.maxLife;
+      slot.gravity = gravity;
       slot.scale = scale * (0.6 + Math.random() * 0.8);
       slot.r = _color.r;
       slot.g = _color.g;
       slot.b = _color.b;
     }
+  }
+
+  private spawnVictoryFireworks(x: number, y: number, winnerId: 1 | 2 | 0, isMatchEnd: boolean): void {
+    const teamCol = winnerId === 1 ? 0x38bdf8 : winnerId === 2 ? 0xf43f5e : 0xe2e8f0;
+    const accentCol = winnerId === 1 ? 0x22d3ee : winnerId === 2 ? 0xfb923c : 0x34d399;
+    const mult = isMatchEnd ? 1.45 : 1.0;
+
+    // Gold starburst fountain above victor
+    this.spawnBurst(x, y, 0.15, Math.round(20 * mult), 0xfacc15, 6.2 * mult, 1.15, 6.4, 0.58, 4.2);
+    // Team energy halo cascade
+    this.spawnBurst(x, y - 0.2, 0.2, Math.round(18 * mult), teamCol, 5.4 * mult, 1.05, 6.8, 0.55, 3.6);
+    // Secondary molecular prism sparks & crisp white highlights
+    this.spawnBurst(x, y + 0.25, 0.1, Math.round(10 * mult), accentCol, 4.6 * mult, 0.9, 5.8, 0.62, 4.6);
+    this.spawnBurst(x, y + 0.1, 0.25, Math.round(8 * mult), 0xffffff, 4.8, 0.8, 7.2, 0.45, 3.8);
   }
 
   private makeBondMesh(p1: THREE.Vector3, p2: THREE.Vector3, radius: number, mat: THREE.Material): THREE.Mesh {
@@ -661,12 +429,39 @@ export class ArenaRenderer {
     return mesh;
   }
 
+  private registerDecompPart(decompParts: DecompPart[], mesh: THREE.Mesh, heightHint: number): void {
+    const idx = decompParts.length + 1;
+    const angle = idx * 2.39996; // Golden-angle distribution
+    const horiz = 2.1 + (idx % 5) * 0.55;
+    const scatterVel = new THREE.Vector3(
+      Math.cos(angle) * horiz,
+      1.6 + ((idx * 7) % 5) * 0.65 + heightHint * 1.4,
+      Math.sin(angle) * horiz * 0.9
+    );
+    const spinAxis = new THREE.Vector3(
+      Math.sin(idx * 1.7),
+      Math.cos(idx * 2.3),
+      Math.sin(idx * 3.1 + 0.5)
+    ).normalize();
+    decompParts.push({
+      mesh,
+      restPos: mesh.position.clone(),
+      restQuat: mesh.quaternion.clone(),
+      restScale: mesh.scale.clone(),
+      scatterVel,
+      spinAxis,
+      spinSpeed: 5.5 + (idx % 4) * 2.0,
+      delay: 0.01 + (1 - heightHint) * 0.08 + (idx % 3) * 0.02,
+    });
+  }
+
   private addMultiBond(
     parent: THREE.Group,
     p1: THREE.Vector3,
     p2: THREE.Vector3,
     order: BondOrderCategory,
     taggedBonds: TaggedBond[],
+    decompParts: DecompPart[],
     heightNorm: number,
     baseColor: number
   ): void {
@@ -687,12 +482,15 @@ export class ArenaRenderer {
       const m = this.makeBondMesh(p1, p2, 0.046, makeMat());
       parent.add(m);
       taggedBonds.push({ mesh: m, order, heightNorm });
+      this.registerDecompPart(decompParts, m, heightNorm);
     } else if (order === 'double' || order === 'aromatic') {
       const off = perp.clone().multiplyScalar(0.055);
       const m1 = this.makeBondMesh(p1.clone().add(off), p2.clone().add(off), 0.036, makeMat());
       const m2 = this.makeBondMesh(p1.clone().sub(off), p2.clone().sub(off), 0.036, makeMat());
       parent.add(m1, m2);
       taggedBonds.push({ mesh: m1, order, heightNorm }, { mesh: m2, order, heightNorm });
+      this.registerDecompPart(decompParts, m1, heightNorm);
+      this.registerDecompPart(decompParts, m2, heightNorm);
     } else {
       const off = perp.clone().multiplyScalar(0.068);
       const m0 = this.makeBondMesh(p1, p2, 0.032, makeMat());
@@ -704,6 +502,9 @@ export class ArenaRenderer {
         { mesh: m1, order, heightNorm },
         { mesh: m2, order, heightNorm }
       );
+      this.registerDecompPart(decompParts, m0, heightNorm);
+      this.registerDecompPart(decompParts, m1, heightNorm);
+      this.registerDecompPart(decompParts, m2, heightNorm);
     }
   }
 
@@ -712,6 +513,8 @@ export class ArenaRenderer {
     pos: THREE.Vector3,
     radius: number,
     jointMats: THREE.MeshPhysicalMaterial[],
+    decompParts: DecompPart[],
+    heightNorm: number,
     colorHex: number
   ): THREE.Mesh {
     const mat = new THREE.MeshPhysicalMaterial({
@@ -726,6 +529,7 @@ export class ArenaRenderer {
     mesh.position.copy(pos);
     mesh.castShadow = !this.isSoftwareGl;
     parent.add(mesh);
+    this.registerDecompPart(decompParts, mesh, heightNorm);
     return mesh;
   }
 
@@ -742,12 +546,13 @@ export class ArenaRenderer {
 
     const taggedBonds: TaggedBond[] = [];
     const jointMats: THREE.MeshPhysicalMaterial[] = [];
+    const decompParts: DecompPart[] = [];
 
     // Pelvis sits 1.48 above ground so thigh (0.74) + shin (0.74) lands flush on y = 0 local
     const pelvis = new THREE.Group();
     pelvis.position.set(0, 1.48, 0);
     facingGroup.add(pelvis);
-    this.addJointAtom(pelvis, new THREE.Vector3(0, 0, 0), 0.11, jointMats, jointCol);
+    this.addJointAtom(pelvis, new THREE.Vector3(0, 0, 0), 0.11, jointMats, decompParts, 0.45, jointCol);
 
     // Spine: Alkyne (-C#C-)
     const spine = new THREE.Group();
@@ -758,6 +563,7 @@ export class ArenaRenderer {
       new THREE.Vector3(0, 1.15, 0),
       'triple',
       taggedBonds,
+      decompParts,
       0.55,
       primaryCol
     );
@@ -776,12 +582,14 @@ export class ArenaRenderer {
     });
     const coreMesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 1), coreMat);
     chestHub.add(coreMesh);
+    this.registerDecompPart(decompParts, coreMesh, 0.72);
 
     const chestRing = new THREE.Mesh(
       new THREE.TorusGeometry(0.24, 0.025, 8, 24),
       new THREE.MeshBasicMaterial({ color: primaryCol })
     );
     chestHub.add(chestRing);
+    this.registerDecompPart(decompParts, chestRing, 0.72);
 
     // Head: Benzene / Phenyl Ring + Visor + Electron Halo
     const headGroup = new THREE.Group();
@@ -789,7 +597,7 @@ export class ArenaRenderer {
     chestHub.add(headGroup);
 
     const neckTop = new THREE.Vector3(0, 0.22, 0);
-    this.addMultiBond(headGroup, new THREE.Vector3(0, 0, 0), neckTop, 'single', taggedBonds, 0.8, primaryCol);
+    this.addMultiBond(headGroup, new THREE.Vector3(0, 0, 0), neckTop, 'single', taggedBonds, decompParts, 0.8, primaryCol);
 
     const ringR = 0.44;
     const ringCy = 0.22 + ringR;
@@ -807,10 +615,11 @@ export class ArenaRenderer {
         pB,
         i % 2 === 0 ? 'double' : 'single',
         taggedBonds,
+        decompParts,
         0.92,
         primaryCol
       );
-      this.addJointAtom(headGroup, pA, 0.075, jointMats, jointCol);
+      this.addJointAtom(headGroup, pA, 0.075, jointMats, decompParts, 0.92, jointCol);
     }
 
     // Glowing Visor inside Benzene Ring facing forward (+X in local facingGroup)
@@ -823,6 +632,7 @@ export class ArenaRenderer {
     const visor = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.11, 0.14), visorMat);
     visor.position.set(0.1, ringCy + 0.04, 0.06);
     headGroup.add(visor);
+    this.registerDecompPart(decompParts, visor, 0.94);
 
     // Electron orbital halo around head (glows bright when Energy == 100%)
     const haloMat = new THREE.MeshBasicMaterial({
@@ -840,19 +650,19 @@ export class ArenaRenderer {
       const shoulder = new THREE.Group();
       shoulder.position.set(shoulderX, 0.04, 0);
       chestHub.add(shoulder);
-      this.addJointAtom(shoulder, new THREE.Vector3(0, 0, 0), 0.085, jointMats, jointCol);
+      this.addJointAtom(shoulder, new THREE.Vector3(0, 0, 0), 0.085, jointMats, decompParts, 0.7, jointCol);
 
       const elbowPos = new THREE.Vector3(0.42, -0.26, 0);
-      this.addMultiBond(shoulder, new THREE.Vector3(0, 0, 0), elbowPos, 'triple', taggedBonds, 0.68, primaryCol);
+      this.addMultiBond(shoulder, new THREE.Vector3(0, 0, 0), elbowPos, 'triple', taggedBonds, decompParts, 0.68, primaryCol);
 
       const forearm = new THREE.Group();
       forearm.position.copy(elbowPos);
       shoulder.add(forearm);
-      this.addJointAtom(forearm, new THREE.Vector3(0, 0, 0), 0.075, jointMats, jointCol);
+      this.addJointAtom(forearm, new THREE.Vector3(0, 0, 0), 0.075, jointMats, decompParts, 0.66, jointCol);
 
       const handPos = new THREE.Vector3(0.38, 0.08, 0);
-      this.addMultiBond(forearm, new THREE.Vector3(0, 0, 0), handPos, 'single', taggedBonds, 0.68, primaryCol);
-      this.addJointAtom(forearm, handPos, 0.1, jointMats, primaryCol);
+      this.addMultiBond(forearm, new THREE.Vector3(0, 0, 0), handPos, 'single', taggedBonds, decompParts, 0.68, primaryCol);
+      this.addJointAtom(forearm, handPos, 0.1, jointMats, decompParts, 0.68, primaryCol);
 
       return { shoulder, forearm, handPos };
     };
@@ -873,23 +683,23 @@ export class ArenaRenderer {
       const leg = new THREE.Group();
       leg.position.set(hipX, 0, 0);
       pelvis.add(leg);
-      this.addJointAtom(leg, new THREE.Vector3(0, 0, 0), 0.085, jointMats, jointCol);
+      this.addJointAtom(leg, new THREE.Vector3(0, 0, 0), 0.085, jointMats, decompParts, 0.42, jointCol);
 
       const kneePos = new THREE.Vector3(0.08, -0.74, 0);
-      this.addMultiBond(leg, new THREE.Vector3(0, 0, 0), kneePos, 'double', taggedBonds, 0.34, primaryCol);
+      this.addMultiBond(leg, new THREE.Vector3(0, 0, 0), kneePos, 'double', taggedBonds, decompParts, 0.34, primaryCol);
 
       const shin = new THREE.Group();
       shin.position.copy(kneePos);
       leg.add(shin);
-      this.addJointAtom(shin, new THREE.Vector3(0, 0, 0), 0.08, jointMats, jointCol);
+      this.addJointAtom(shin, new THREE.Vector3(0, 0, 0), 0.08, jointMats, decompParts, 0.24, jointCol);
 
       const anklePos = new THREE.Vector3(-0.04, -0.74, 0);
-      this.addMultiBond(shin, new THREE.Vector3(0, 0, 0), anklePos, 'double', taggedBonds, 0.14, primaryCol);
-      this.addJointAtom(shin, anklePos, 0.075, jointMats, jointCol);
+      this.addMultiBond(shin, new THREE.Vector3(0, 0, 0), anklePos, 'double', taggedBonds, decompParts, 0.14, primaryCol);
+      this.addJointAtom(shin, anklePos, 0.075, jointMats, decompParts, 0.12, jointCol);
 
       const toePos = new THREE.Vector3(0.24, -0.74, 0);
-      this.addMultiBond(shin, anklePos, toePos, 'single', taggedBonds, 0.05, primaryCol);
-      this.addJointAtom(shin, toePos, 0.065, jointMats, primaryCol);
+      this.addMultiBond(shin, anklePos, toePos, 'single', taggedBonds, decompParts, 0.05, primaryCol);
+      this.addJointAtom(shin, toePos, 0.065, jointMats, decompParts, 0.05, primaryCol);
 
       return { leg, shin };
     };
@@ -959,37 +769,49 @@ export class ArenaRenderer {
       shadowMat,
       taggedBonds,
       jointMats,
+      decompParts,
+      decompTimer: 0,
+      decompSparkTimer: 0,
       weaponGroup,
       weaponHaloMat: null,
+      currentScale: 1,
+      buffAuraTimer: 0,
     };
   }
 
-  public setWeapon(playerId: 1 | 2, mol: ParsedMolecule): void {
-    const rig = playerId === 1 ? this.p1Rig : this.p2Rig;
-    const wGroup = rig.weaponGroup;
-
-    // Dispose old weapon children
-    while (wGroup.children.length > 0) {
-      const child = wGroup.children[0];
-      if (child instanceof THREE.Mesh) {
+  private disposeGroupChildren(g: THREE.Group): void {
+    while (g.children.length > 0) {
+      const child = g.children[0];
+      if (child instanceof THREE.Group) {
+        this.disposeGroupChildren(child);
+      } else if (child instanceof THREE.Mesh || child instanceof THREE.Line) {
         if (child.geometry !== this.sharedSphereGeo && child.geometry !== this.sharedCylGeo) {
           child.geometry.dispose();
         }
         if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
         else child.material.dispose();
       }
-      wGroup.remove(child);
+      g.remove(child);
     }
+  }
 
-    const scale = 1.45;
+  private populateMoleculeGroup(
+    targetGroup: THREE.Group,
+    playerId: 1 | 2,
+    mol: ParsedMolecule,
+    scale: number,
+    auraRadius: number,
+    auraOpacity: number
+  ): THREE.MeshBasicMaterial {
+    this.disposeGroupChildren(targetGroup);
+
     const atomPositions: THREE.Vector3[] = [];
-
     for (const atom of mol.atoms) {
       const col = CPK_COLORS[atom.elem] ?? 0x94a3b8;
       const mat = new THREE.MeshPhysicalMaterial({
         color: col,
         emissive: col,
-        emissiveIntensity: 0.22,
+        emissiveIntensity: 0.25,
         roughness: 0.14,
         metalness: 0.25,
         clearcoat: 1.0,
@@ -1000,7 +822,7 @@ export class ArenaRenderer {
       const pos = new THREE.Vector3(atom.x * scale, atom.y * scale, atom.z * scale);
       mesh.position.copy(pos);
       mesh.castShadow = !this.isSoftwareGl;
-      wGroup.add(mesh);
+      targetGroup.add(mesh);
       atomPositions.push(pos);
     }
 
@@ -1022,15 +844,15 @@ export class ArenaRenderer {
 
       if (bond.order >= 2.5) {
         const off = perp.clone().multiplyScalar(0.055);
-        wGroup.add(this.makeBondMesh(p1, p2, 0.025, bondMat));
-        wGroup.add(this.makeBondMesh(p1.clone().add(off), p2.clone().add(off), 0.024, bondMat));
-        wGroup.add(this.makeBondMesh(p1.clone().sub(off), p2.clone().sub(off), 0.024, bondMat));
+        targetGroup.add(this.makeBondMesh(p1, p2, 0.025, bondMat));
+        targetGroup.add(this.makeBondMesh(p1.clone().add(off), p2.clone().add(off), 0.024, bondMat));
+        targetGroup.add(this.makeBondMesh(p1.clone().sub(off), p2.clone().sub(off), 0.024, bondMat));
       } else if (bond.order >= 1.5) {
         const off = perp.clone().multiplyScalar(0.045);
-        wGroup.add(this.makeBondMesh(p1.clone().add(off), p2.clone().add(off), 0.028, bondMat));
-        wGroup.add(this.makeBondMesh(p1.clone().sub(off), p2.clone().sub(off), 0.028, bondMat));
+        targetGroup.add(this.makeBondMesh(p1.clone().add(off), p2.clone().add(off), 0.028, bondMat));
+        targetGroup.add(this.makeBondMesh(p1.clone().sub(off), p2.clone().sub(off), 0.028, bondMat));
       } else {
-        wGroup.add(this.makeBondMesh(p1, p2, 0.036, bondMat));
+        targetGroup.add(this.makeBondMesh(p1, p2, 0.036, bondMat));
       }
     }
 
@@ -1038,11 +860,18 @@ export class ArenaRenderer {
       color: playerId === 1 ? 0x38bdf8 : 0xf43f5e,
       wireframe: true,
       transparent: true,
-      opacity: 0.22,
+      opacity: auraOpacity,
     });
-    const aura = new THREE.Mesh(new THREE.OctahedronGeometry(0.9, 1), auraMat);
-    wGroup.add(aura);
-    rig.weaponHaloMat = auraMat;
+    const aura = new THREE.Mesh(new THREE.OctahedronGeometry(auraRadius, 1), auraMat);
+    targetGroup.add(aura);
+    return auraMat;
+  }
+
+  public setWeapon(playerId: 1 | 2, mol: ParsedMolecule): void {
+    const rig = playerId === 1 ? this.p1Rig : this.p2Rig;
+    if (playerId === 1) this.p1Mol = mol;
+    else this.p2Mol = mol;
+    rig.weaponHaloMat = this.populateMoleculeGroup(rig.weaponGroup, playerId, mol, 1.45, 0.9, 0.22);
   }
 
   public applyColorScheme(mode: ColorSchemeMode): void {
@@ -1089,11 +918,39 @@ export class ArenaRenderer {
     gameState: 'title' | 'playing' | 'paused' | 'gameover',
     events: CombatEvent[]
   ): void {
+    const firstSync = this.latestMatch === null;
     this.latestMatch = match;
     this.currentState = gameState;
+    if (firstSync) {
+      this.p1Rig.group.position.set(match.p1.x, match.p1.y, 0);
+      this.p1Rig.facingGroup.scale.x = match.p1.facing;
+      this.p2Rig.group.position.set(match.p2.x, match.p2.y, 0);
+      this.p2Rig.facingGroup.scale.x = match.p2.facing;
+    }
+
+    if (gameState === 'title' || match.phase === 'round_intro' || match.phase === 'fighting') {
+      this.celebrationPhase = 'none';
+      this.celebrationWinner = null;
+      if (this.outroState.active) {
+        this.clearStageOutro();
+      }
+    } else if (match.phase === 'match_over' || gameState === 'gameover') {
+      this.celebrationPhase = 'match';
+      this.celebrationWinner = match.matchWinner;
+    } else if (match.phase === 'round_ko') {
+      this.celebrationPhase = 'round';
+      this.celebrationWinner = match.roundWinner;
+    }
 
     for (const ev of events) {
-      if (ev.type === 'hit') {
+      if (ev.type === 'powerup_spawn') {
+        const col = this.powerUpColor(ev.powerUpType);
+        this.spawnBurst(ev.x, ev.y, 0.1, 10, col, 3.2, 0.8, 4.0, 0.35, 0.4);
+      } else if (ev.type === 'powerup_pickup') {
+        const col = this.powerUpColor(ev.powerUpType);
+        this.spawnBurst(ev.x, ev.y + 0.4, 0.15, 22, col, 6.2, 1.05, 8.0, 0.45, 2.5);
+        this.spawnBurst(ev.x, ev.y + 0.4, 0.18, 8, 0xffffff, 4.8, 0.8, 7.0, 0.35, 2.0);
+      } else if (ev.type === 'hit') {
         const col = ev.special ? 0xfacc15 : ev.attackerId === 1 ? 0x38bdf8 : 0xf43f5e;
         this.spawnBurst(ev.x, ev.y, 0.2, ev.special ? 28 : ev.heavy ? 18 : 11, col, ev.special ? 8.5 : 5.8, ev.special ? 1.4 : 1.0);
         this.spawnBurst(ev.x, ev.y, 0.25, 6, 0xffffff, 4.5, 0.75);
@@ -1106,45 +963,217 @@ export class ArenaRenderer {
         this.spawnBurst(ev.x, ev.y + 0.08, 0, 5, 0x94a3b8, 2.1, 0.55);
       } else if (ev.type === 'special_start') {
         this.spawnBurst(ev.x, ev.y, 0.1, 20, 0xfacc15, 6.2, 1.15);
+      } else if (ev.type === 'throw') {
+        const col = ev.fighterId === 1 ? 0x38bdf8 : 0xf43f5e;
+        this.spawnBurst(ev.x, ev.y, 0.15, 14, col, 4.6, 0.9, 9, 0.3, 0.8);
+        this.spawnBurst(ev.x, ev.y, 0.15, 6, 0xffffff, 3.8, 0.65, 10, 0.24, 0.5);
+      } else if (ev.type === 'uppercut_start') {
+        const col = ev.fighterId === 1 ? 0x22d3ee : 0xfb7185;
+        this.spawnBurst(ev.x, ev.y, 0.1, 14, col, 5.2, 0.95, 8, 0.34, 3.5);
+      } else if (ev.type === 'lunge_start') {
+        const col = ev.fighterId === 1 ? 0x38bdf8 : 0xf43f5e;
+        this.spawnBurst(ev.x, ev.y, 0.1, 12, col, 4.8, 0.85, 11, 0.28, 1.2);
+      } else if (ev.type === 'projectile_shatter') {
+        const col = ev.ownerId === 1 ? 0x38bdf8 : 0xf43f5e;
+        this.spawnBurst(ev.x, ev.y, 0.2, 16, col, 5.8, 0.95, 9.5, 0.38, 1.6);
+        this.spawnBurst(ev.x, ev.y, 0.2, 8, 0xfacc15, 4.6, 0.8, 8.5, 0.35, 1.8);
+        this.spawnBurst(ev.x, ev.y, 0.22, 6, 0xffffff, 4.2, 0.7, 10, 0.28, 1.2);
+      } else if (ev.type === 'round_end') {
+        if (ev.winnerId === 1 || ev.winnerId === 2) {
+          const winner = ev.winnerId === 1 ? match.p1 : match.p2;
+          const loser = ev.winnerId === 1 ? match.p2 : match.p1;
+          if (ev.reason === 'ko') {
+            // Chemical decomposition shatter wave on KO'd loser
+            this.spawnBurst(loser.x, loser.y + 1.25, 0.2, 24, 0xffffff, 7.2, 1.15, 7.5, 0.52, 2.8);
+            this.spawnBurst(loser.x, loser.y + 1.1, 0.15, 18, 0x38bdf8, 5.8, 1.0, 6.2, 0.58, 2.4);
+            this.spawnBurst(loser.x, loser.y + 1.35, 0.15, 14, 0xfacc15, 5.2, 0.95, 5.8, 0.62, 2.8);
+          }
+          this.spawnVictoryFireworks(winner.x, winner.y + 2.35, ev.winnerId, false);
+        } else {
+          this.spawnVictoryFireworks(0, FLOOR_Y + 2.2, 0, false);
+        }
+        this.victorySparkTimer = 0.14;
+      } else if (ev.type === 'match_end') {
+        if (ev.winnerId === 1 || ev.winnerId === 2) {
+          const winner = ev.winnerId === 1 ? match.p1 : match.p2;
+          this.spawnVictoryFireworks(winner.x, winner.y + 2.55, ev.winnerId, true);
+        } else {
+          this.spawnVictoryFireworks(0, FLOOR_Y + 2.4, 0, true);
+        }
+        this.victorySparkTimer = 0.08;
       }
     }
   }
 
-  private animateRig(rig: FighterRig, f: FighterState, dt: number): void {
-    rig.group.position.set(f.x, f.y, 0);
+  private animateRig(
+    rig: FighterRig,
+    f: FighterState,
+    dt: number,
+    victoryMode: 'none' | 'round' | 'match' = 'none'
+  ): void {
+    const targetScale = getFighterBodyScale(f);
+    rig.currentScale += (targetScale - rig.currentScale) * (1 - Math.exp(-10 * dt));
+
+    if (!this.outroState.active || this.outroState.winnerId !== f.id) {
+      rig.group.position.set(f.x, f.y, 0);
+      rig.group.scale.setScalar(rig.currentScale);
+      rig.group.rotation.y = 0;
+      rig.group.visible = true;
+    }
     rig.facingGroup.scale.x = f.facing;
     rig.squashGroup.scale.set(f.squashX, f.squashY, 1);
 
-    // Contact shadow grounding & height falloff
+    const isKo = f.state === 'ko';
+
+    // Contact shadow grounding & height falloff (fades out as loser decomposes)
     const heightAboveFloor = Math.max(0, f.y - FLOOR_Y);
-    const shadowScale = Math.max(0.45, 1 - heightAboveFloor * 0.18);
+    const shadowScale = Math.max(0.45, 1 - heightAboveFloor * 0.18) * rig.currentScale;
     rig.shadowDisc.position.set(f.x, FLOOR_Y + 0.015, 0);
     rig.shadowDisc.scale.setScalar(shadowScale);
-    rig.shadowMat.opacity = Math.max(0.15, 0.65 - heightAboveFloor * 0.15);
+    const decompFade = isKo ? Math.max(0, 1 - rig.decompTimer / 1.15) : 1;
+    rig.shadowMat.opacity = Math.max(isKo ? 0 : 0.15, (0.65 - heightAboveFloor * 0.15) * decompFade);
 
-    // Hit flash (40-75ms bright white emissive pulse)
+    // Hit flash, chemical decomposition glow, or active buff aura
     const flashing = f.flashTimer > 0;
+    const decompFlash = isKo && rig.decompTimer < 0.24;
+    const hasFistBuff = (f.buffs?.fist ?? 0) > 0;
+    const hasLightningBuff = (f.buffs?.lightning ?? 0) > 0;
+    const hasTripleBuff = (f.buffs?.tripleThrow ?? 0) > 0;
+
     for (const jm of rig.jointMats) {
-      if (flashing) {
-        jm.emissive.setHex(0xffffff);
-        jm.emissiveIntensity = 2.0;
+      if (flashing || decompFlash) {
+        jm.emissive.setHex(decompFlash ? 0xfef08a : 0xffffff);
+        jm.emissiveIntensity = decompFlash ? 1.85 : 2.0;
+      } else if (hasFistBuff) {
+        jm.emissive.setHex(0xf97316);
+        jm.emissiveIntensity = 0.45 + Math.sin(this.elapsed * 9) * 0.15;
+      } else if (hasLightningBuff) {
+        jm.emissive.setHex(0xfacc15);
+        jm.emissiveIntensity = 0.35 + Math.sin(this.elapsed * 16) * 0.15;
+      } else if (hasTripleBuff) {
+        jm.emissive.setHex(0xc084fc);
+        jm.emissiveIntensity = 0.32;
       } else {
         jm.emissiveIntensity = 0;
       }
     }
 
-    // Special ready electron halo speed & brightness
-    const ready = f.energy >= 100;
-    rig.haloMesh.rotation.z += dt * (ready ? 6.5 : 1.6);
-    rig.haloMesh.rotation.y += dt * (ready ? 3.2 : 0.9);
-    rig.haloMat.opacity = ready ? 0.85 : 0.28;
-    rig.coreMesh.rotation.y += dt * (ready ? 5.0 : 1.8);
+    // Periodic ambient aura sparks for active buffs
+    if (!isKo && this.currentState === 'playing' && (hasFistBuff || hasLightningBuff || hasTripleBuff || (f.buffs?.giant ?? 0) > 0 || (f.buffs?.shrink ?? 0) > 0)) {
+      rig.buffAuraTimer -= dt;
+      if (rig.buffAuraTimer <= 0) {
+        rig.buffAuraTimer = 0.22;
+        const auraCol = hasLightningBuff
+          ? 0xfacc15
+          : hasFistBuff
+          ? 0xf97316
+          : hasTripleBuff
+          ? 0xc084fc
+          : (f.buffs?.giant ?? 0) > 0
+          ? 0xf59e0b
+          : 0x34d399;
+        this.spawnBurst(
+          f.x + (Math.random() - 0.5) * 0.7 * rig.currentScale,
+          f.y + (0.4 + Math.random() * 1.4) * rig.currentScale,
+          0.12,
+          2,
+          auraCol,
+          1.4,
+          0.55,
+          -1.5,
+          0.35,
+          0.9
+        );
+      }
+    }
 
-    // Rotate 3D molecular weapon smoothly
-    rig.weaponGroup.rotation.y += dt * (ready ? 3.6 : 1.4);
-    rig.weaponGroup.rotation.z += dt * 0.8;
+    const t = this.elapsed;
+    const isVictor = victoryMode !== 'none' && !isKo;
+
+    // Special ready or victory electron halo speed & brightness
+    const ready = f.energy >= 100 || isVictor || hasLightningBuff;
+    rig.haloMesh.visible = !isKo;
+    rig.shieldMesh.visible = !isKo;
+    rig.weaponGroup.visible = f.hasWeaponInHand && !isKo;
+
+    rig.haloMesh.rotation.z += dt * (isVictor ? 8.0 : ready ? 6.5 : 1.6);
+    rig.haloMesh.rotation.y += dt * (isVictor ? 4.2 : ready ? 3.2 : 0.9);
+    rig.haloMat.opacity = isVictor ? 0.95 : ready ? 0.85 : 0.28;
+    rig.coreMesh.rotation.y += dt * (isVictor ? 6.5 : ready ? 5.0 : 1.8);
+    if (isVictor) {
+      rig.coreMesh.scale.setScalar(1.08 + Math.sin(t * 9.0) * 0.14);
+      rig.visorMat.emissiveIntensity = 2.35;
+      rig.floorRingMat.opacity = 0.82 + Math.sin(t * 10.0) * 0.18;
+    } else if (isKo) {
+      rig.visorMat.emissiveIntensity = 1.4 * decompFade;
+      rig.floorRingMat.opacity = 0.65 * decompFade;
+    } else {
+      rig.coreMesh.scale.setScalar(1);
+      rig.visorMat.emissiveIntensity = 1.4;
+      rig.floorRingMat.opacity = 0.65;
+    }
+
+    // Chemical decomposition into small molecular fragments when KO'd
+    if (isKo) {
+      if (this.currentState !== 'paused') {
+        rig.decompTimer += dt;
+        rig.decompSparkTimer -= dt;
+        if (rig.decompTimer < 1.35 && rig.decompSparkTimer <= 0) {
+          rig.decompSparkTimer = 0.085;
+          const cpkPool = [0x38bdf8, 0x3b82f6, 0xf43f5e, 0xfacc15, 0x4ade80];
+          const colA = cpkPool[Math.floor(Math.random() * cpkPool.length)];
+          const colB = cpkPool[Math.floor(Math.random() * cpkPool.length)];
+          const sx = f.x + (Math.random() - 0.5) * 1.25;
+          const sy = f.y + 0.35 + Math.random() * 1.45;
+          this.spawnBurst(sx, sy, (Math.random() - 0.5) * 0.5, 5, colA, 3.2, 0.9, 3.6, 0.68, 2.4);
+          this.spawnBurst(sx, sy + 0.2, 0.15, 3, colB, 2.6, 0.76, 2.8, 0.72, 2.6);
+        }
+      }
+
+      for (let i = 0; i < rig.decompParts.length; i++) {
+        const part = rig.decompParts[i];
+        if (rig.decompTimer <= part.delay) {
+          // Tremor right before bond breaks
+          const jit = 0.04;
+          part.mesh.position.set(
+            part.restPos.x + (Math.random() - 0.5) * jit,
+            part.restPos.y + (Math.random() - 0.5) * jit,
+            part.restPos.z + (Math.random() - 0.5) * jit
+          );
+          part.mesh.visible = true;
+          continue;
+        }
+        const localT = rig.decompTimer - part.delay;
+        const fadeT = Math.min(1, localT / 1.15);
+        const sFactor = Math.max(0, 1 - fadeT * fadeT);
+        part.mesh.position.set(
+          part.restPos.x + part.scatterVel.x * localT,
+          Math.max(-1.25, part.restPos.y + part.scatterVel.y * localT - 3.2 * localT * localT),
+          part.restPos.z + part.scatterVel.z * localT
+        );
+        _quat.setFromAxisAngle(part.spinAxis, localT * part.spinSpeed);
+        part.mesh.quaternion.copy(part.restQuat).premultiply(_quat);
+        part.mesh.scale.copy(part.restScale).multiplyScalar(sFactor);
+        part.mesh.visible = sFactor > 0.04;
+      }
+    } else if (rig.decompTimer > 0) {
+      // Cleanly restore intact fighter rig for next round / rematch / title
+      rig.decompTimer = 0;
+      rig.decompSparkTimer = 0;
+      for (let i = 0; i < rig.decompParts.length; i++) {
+        const part = rig.decompParts[i];
+        part.mesh.position.copy(part.restPos);
+        part.mesh.quaternion.copy(part.restQuat);
+        part.mesh.scale.copy(part.restScale);
+        part.mesh.visible = true;
+      }
+    }
+
+    // Rotate 3D molecular weapon smoothly (faster triumph spin on victory)
+    rig.weaponGroup.rotation.y += dt * (isVictor ? 5.4 : ready ? 3.6 : 1.4);
+    rig.weaponGroup.rotation.z += dt * (isVictor ? 1.6 : 0.8);
     if (rig.weaponHaloMat) {
-      rig.weaponHaloMat.opacity = ready ? 0.52 : 0.2;
+      rig.weaponHaloMat.opacity = isVictor ? 0.78 : ready ? 0.52 : 0.2;
     }
 
     // Shield visibility
@@ -1166,10 +1195,49 @@ export class ArenaRenderer {
     let rShinZ = -0.18;
     let rootRotZ = 0;
 
-    const t = this.elapsed;
     const progress = f.stateDuration > 0 ? 1 - f.stateTimer / f.stateDuration : 0;
+    const canVictoryPose =
+      isVictor &&
+      (f.state === 'idle' ||
+        f.state === 'walk' ||
+        f.state === 'crouch' ||
+        f.state === 'block' ||
+        f.state === 'punch_recovery' ||
+        f.state === 'kick_recovery' ||
+        f.state === 'special_recovery');
 
-    if (f.state === 'idle') {
+    if (canVictoryPose) {
+      if (victoryMode === 'match') {
+        // Grand Match Victory Pose: rhythmic champion hover/bounce & double-arm skyward weapon flourish
+        const hop = Math.max(0, Math.sin(t * 3.6)) * 0.22;
+        const flourish = Math.sin(t * 6.2);
+        pelvisY = 1.52 + hop;
+        spineRotZ = 0.1 + Math.sin(t * 3.1) * 0.04;
+        headRotZ = -0.08;
+        rArmZ = 2.18 + flourish * 0.15;
+        rForeZ = -0.14;
+        lArmZ = 1.98 - flourish * 0.14;
+        lForeZ = 0.36;
+        lLegZ = 0.34 + hop * 0.9;
+        lShinZ = -0.24 - hop * 1.5;
+        rLegZ = -0.34 + hop * 0.4;
+        rShinZ = -0.18 - hop * 1.1;
+      } else {
+        // Round Victory Pose: proud chest-out stance, weapon thrust aloft + off-hand fist pump
+        const pump = Math.sin(t * 7.5);
+        pelvisY = 1.5 + Math.abs(pump) * 0.055;
+        spineRotZ = 0.09;
+        headRotZ = -0.06;
+        rArmZ = 2.14 + Math.sin(t * 4.8) * 0.1;
+        rForeZ = -0.16;
+        lArmZ = 1.62 + pump * 0.18;
+        lForeZ = 0.98;
+        lLegZ = 0.34;
+        lShinZ = -0.26;
+        rLegZ = -0.36;
+        rShinZ = -0.18;
+      }
+    } else if (f.state === 'idle') {
       const bob = Math.sin(t * 4.2 + f.id) * 0.045;
       pelvisY += bob;
       lArmZ = 0.6 + Math.sin(t * 4.2) * 0.08;
@@ -1254,6 +1322,47 @@ export class ArenaRenderer {
     } else if (f.state === 'kick_recovery') {
       spineRotZ = 0.14 * (1 - progress);
       rLegZ = 0.4 * (1 - progress);
+    } else if (f.state === 'throw_windup') {
+      spineRotZ = 0.28;
+      rArmZ = 2.35;
+      rForeZ = 0.8;
+      lArmZ = 0.95;
+    } else if (f.state === 'throw_recovery') {
+      spineRotZ = -0.32 * (1 - progress * 0.5);
+      rArmZ = 1.05;
+      rForeZ = -0.05;
+      lArmZ = -0.5;
+    } else if (f.state === 'uppercut_windup') {
+      pelvisY = 1.14;
+      spineRotZ = -0.18;
+      rArmZ = -1.4;
+      rForeZ = 0.95;
+    } else if (f.state === 'uppercut_active') {
+      pelvisY = 1.6;
+      spineRotZ = 0.22;
+      rArmZ = 2.25;
+      rForeZ = 0.15;
+      lArmZ = -0.75;
+      lLegZ = 0.45;
+      lShinZ = -0.85;
+    } else if (f.state === 'uppercut_recovery') {
+      spineRotZ = 0.12 * (1 - progress);
+      rArmZ = 1.4 * (1 - progress);
+    } else if (f.state === 'lunge_windup') {
+      pelvisY = 1.26;
+      spineRotZ = -0.28;
+      rArmZ = -1.35;
+      lArmZ = 1.05;
+    } else if (f.state === 'lunge_active') {
+      spineRotZ = -0.4;
+      rArmZ = 1.25;
+      rForeZ = 0.0;
+      lArmZ = -0.65;
+      lLegZ = 0.52;
+      rLegZ = -0.52;
+    } else if (f.state === 'lunge_recovery') {
+      spineRotZ = -0.18 * (1 - progress);
+      rArmZ = 0.45 * (1 - progress);
     } else if (f.state === 'special_windup') {
       pelvisY = 1.28;
       spineRotZ = 0.28;
@@ -1270,11 +1379,12 @@ export class ArenaRenderer {
       lArmZ = -0.4;
       rArmZ = -0.9;
     } else if (f.state === 'ko') {
-      pelvisY = 0.45;
-      rootRotZ = 1.48;
-      spineRotZ = 0.25;
-      rArmZ = -1.2;
-      lLegZ = 0.4;
+      pelvisY = 1.15;
+      rootRotZ = 0.36;
+      spineRotZ = 0.22;
+      rArmZ = -1.1;
+      lArmZ = -0.8;
+      lLegZ = 0.35;
     }
 
     const k = 1 - Math.exp(-22 * dt);
@@ -1307,7 +1417,7 @@ export class ArenaRenderer {
         this.particleMesh.setMatrixAt(i, _mat4);
         continue;
       }
-      p.vy -= 14 * dt;
+      p.vy -= p.gravity * dt;
       p.px += p.vx * dt;
       p.py += p.vy * dt;
       p.pz += p.vz * dt;
@@ -1336,53 +1446,101 @@ export class ArenaRenderer {
     const dt = Math.min(rawDt, 0.05);
     this.elapsed += dt;
 
-    // Ambient background organelles
-    this.dnaGroup.rotation.y += dt * 0.35;
-    this.mitoLeft.position.y = 3.65 + Math.sin(this.elapsed * 0.9) * 0.22;
-    this.mitoRight.position.y = 3.55 + Math.cos(this.elapsed * 0.85) * 0.22;
-
-    for (let i = 0; i < this.vesicleBase.length; i++) {
-      const vb = this.vesicleBase[i];
-      _vec3A.set(
-        vb.x + Math.sin(this.elapsed * 0.4 + vb.phase) * 0.35,
-        vb.y + Math.sin(this.elapsed * vb.speed + vb.phase) * 0.45,
-        vb.z
-      );
-      _quat.identity();
-      _scaleVec.setScalar(vb.s);
-      _mat4.compose(_vec3A, _quat, _scaleVec);
-      this.vesicleMesh.setMatrixAt(i, _mat4);
-    }
-    this.vesicleMesh.instanceMatrix.needsUpdate = true;
+    // Ambient stage environment animations
+    this.activeStage?.update(this.elapsed, dt);
 
     // Animate fighters
     if (this.latestMatch) {
-      this.animateRig(this.p1Rig, this.latestMatch.p1, dt);
-      this.animateRig(this.p2Rig, this.latestMatch.p2, dt);
+      const activeCelem = this.currentState !== 'title' ? this.celebrationPhase : 'none';
+      const p1Victory: 'none' | 'round' | 'match' =
+        activeCelem !== 'none' && this.celebrationWinner === 1 ? activeCelem : 'none';
+      const p2Victory: 'none' | 'round' | 'match' =
+        activeCelem !== 'none' && this.celebrationWinner === 2 ? activeCelem : 'none';
 
-      // Dynamic camera rig
+      this.animateRig(this.p1Rig, this.latestMatch.p1, dt, p1Victory);
+      this.animateRig(this.p2Rig, this.latestMatch.p2, dt, p2Victory);
+
+      // Sync 3D molecular projectiles & falling functional power-ups
+      this.syncProjectiles(this.latestMatch, dt);
+      this.syncPowerUps(this.latestMatch, dt);
+
+      // Stage-specific 3D victory outro animation
+      if (this.outroState.active && this.outroState.update) {
+        this.outroState.elapsed += dt;
+        const victor = this.outroState.winnerId === 1 ? this.latestMatch.p1 : this.latestMatch.p2;
+        const victorRig = this.outroState.winnerId === 1 ? this.p1Rig : this.p2Rig;
+        this.outroState.update(this.outroState.elapsed, dt, victorRig, victor);
+      }
+
+      // Sustained celebratory spark fountain during round_ko and match_over
+      if (activeCelem !== 'none' && this.currentState !== 'paused' && !this.outroState.active) {
+        this.victorySparkTimer -= dt;
+        if (this.victorySparkTimer <= 0) {
+          this.victorySparkTimer = activeCelem === 'match' ? 0.11 : 0.16;
+          if (this.celebrationWinner === 1 || this.celebrationWinner === 2) {
+            const victor = this.celebrationWinner === 1 ? this.latestMatch.p1 : this.latestMatch.p2;
+            const teamCol = this.celebrationWinner === 1 ? 0x38bdf8 : 0xf43f5e;
+            const sparkX = victor.x + victor.facing * 0.35;
+            const sparkY = victor.y + 2.65;
+            this.spawnBurst(sparkX, sparkY, 0.15, activeCelem === 'match' ? 4 : 3, 0xfacc15, 3.6, 0.9, 6.2, 0.55, 3.8);
+            this.spawnBurst(sparkX, sparkY, 0.2, activeCelem === 'match' ? 3 : 2, teamCol, 3.2, 0.85, 6.5, 0.5, 3.2);
+          } else {
+            this.spawnBurst(0, FLOOR_Y + 2.4, 0.15, 3, 0xe2e8f0, 3.0, 0.8, 6.2, 0.48, 3.2);
+          }
+        }
+      }
+
+      // Dynamic camera rig calibrated for the expanded 21.2m arena & cinematic stage outros
       if (this.currentState === 'title') {
-        const targetX = Math.sin(this.elapsed * 0.42) * 1.15;
-        const targetY = 1.05 + Math.cos(this.elapsed * 0.35) * 0.15;
-        const targetZ = 12.6;
+        const targetX = Math.sin(this.elapsed * 0.42) * 1.45;
+        const targetY = 1.15 + Math.cos(this.elapsed * 0.35) * 0.18;
+        const targetZ = 15.6;
         const k = 1 - Math.exp(-3.5 * dt);
         this.camX += (targetX - this.camX) * k;
         this.camY += (targetY - this.camY) * k;
         this.camZ += (targetZ - this.camZ) * k;
         this.lookX += (0 - this.lookX) * k;
-        this.lookY += (0.32 - this.lookY) * k;
+        this.lookY += (0.34 - this.lookY) * k;
+      } else if (this.outroState.active) {
+        const victor = this.outroState.winnerId === 1 ? this.latestMatch.p1 : this.latestMatch.p2;
+        const targetX = THREE.MathUtils.clamp(victor.x, -7.2, 7.2);
+        const targetY = 1.15 + Math.sin(this.outroState.elapsed * 0.9) * 0.14;
+        const targetZ = 8.3;
+        const k = 1 - Math.exp(-4.5 * dt);
+        this.camX += (targetX - this.camX) * k;
+        this.camY += (targetY - this.camY) * k;
+        this.camZ += (targetZ - this.camZ) * k;
+        this.lookX += (victor.x - this.lookX) * k;
+        this.lookY += (0.55 - this.lookY) * k;
+      } else if (
+        activeCelem !== 'none' &&
+        (this.celebrationWinner === 1 || this.celebrationWinner === 2)
+      ) {
+        const victor = this.celebrationWinner === 1 ? this.latestMatch.p1 : this.latestMatch.p2;
+        const midX = (this.latestMatch.p1.x + this.latestMatch.p2.x) * 0.5;
+        const sep = Math.abs(this.latestMatch.p1.x - this.latestMatch.p2.x);
+        const targetX = THREE.MathUtils.clamp(victor.x * 0.72 + midX * 0.28, -5.6, 5.6);
+        const targetZ = THREE.MathUtils.clamp(10.2 + sep * 0.3, 10.2, 15.8);
+        const targetY = 1.02 + Math.max(0, victor.y - FLOOR_Y) * 0.25;
+        const targetLookX = THREE.MathUtils.clamp(victor.x * 0.54 + midX * 0.46, -5.4, 5.4);
+        const k = 1 - Math.exp(-5.5 * dt);
+        this.camX += (targetX - this.camX) * k;
+        this.camY += (targetY - this.camY) * k;
+        this.camZ += (targetZ - this.camZ) * k;
+        this.lookX += (targetLookX - this.lookX) * k;
+        this.lookY += (0.52 - this.lookY) * k;
       } else {
         const midX = (this.latestMatch.p1.x + this.latestMatch.p2.x) * 0.5;
         const sep = Math.abs(this.latestMatch.p1.x - this.latestMatch.p2.x);
-        const targetX = THREE.MathUtils.clamp(midX * 0.55, -2.5, 2.5);
-        const targetZ = THREE.MathUtils.clamp(11.4 + sep * 0.42, 11.4, 15.2);
-        const targetY = 1.1 + Math.max(this.latestMatch.p1.y - FLOOR_Y, this.latestMatch.p2.y - FLOOR_Y) * 0.25;
+        const targetX = THREE.MathUtils.clamp(midX * 0.72, -5.4, 5.4);
+        const targetZ = THREE.MathUtils.clamp(12.2 + sep * 0.44, 12.2, 18.8);
+        const targetY = 1.16 + Math.max(this.latestMatch.p1.y - FLOOR_Y, this.latestMatch.p2.y - FLOOR_Y) * 0.25;
         const k = 1 - Math.exp(-7 * dt);
         this.camX += (targetX - this.camX) * k;
         this.camY += (targetY - this.camY) * k;
         this.camZ += (targetZ - this.camZ) * k;
-        this.lookX += (midX * 0.35 - this.lookX) * k;
-        this.lookY += (0.28 - this.lookY) * k;
+        this.lookX += (midX * 0.56 - this.lookX) * k;
+        this.lookY += (0.3 - this.lookY) * k;
       }
 
       const trauma = this.latestMatch.cameraTrauma;
@@ -1427,6 +1585,596 @@ export class ArenaRenderer {
     }
   }
 
+  private syncProjectiles(match: MatchState, dt: number): void {
+    const activeIds = new Set<number>();
+    for (let i = 0; i < match.projectiles.length; i++) {
+      const proj = match.projectiles[i];
+      activeIds.add(proj.id);
+
+      let vis = this.projectileVisuals.get(proj.id);
+      if (!vis) {
+        const group = new THREE.Group();
+        const mol = proj.ownerId === 1 ? this.p1Mol : this.p2Mol;
+        if (mol) {
+          this.populateMoleculeGroup(group, proj.ownerId, mol, 1.32, 0.85, 0.55);
+        }
+        this.scene.add(group);
+        vis = { group, trailTimer: 0, ownerId: proj.ownerId };
+        this.projectileVisuals.set(proj.id, vis);
+      }
+
+      vis.group.position.set(proj.x, proj.y, 0.12);
+      vis.group.rotation.z = -proj.spinAngle;
+      vis.group.rotation.y = proj.spinAngle * 0.65;
+
+      if (this.currentState !== 'paused') {
+        vis.trailTimer -= dt;
+        if (vis.trailTimer <= 0) {
+          vis.trailTimer = 0.032;
+          const col = proj.ownerId === 1 ? 0x38bdf8 : 0xf43f5e;
+          this.spawnBurst(proj.x, proj.y, 0.1, 2, col, 1.8, 0.72, 4.0, 0.24, 0.3);
+          this.spawnBurst(proj.x, proj.y, 0.12, 1, 0xfacc15, 1.4, 0.55, 3.0, 0.2, 0.2);
+        }
+      }
+    }
+
+    for (const [id, vis] of this.projectileVisuals.entries()) {
+      if (!activeIds.has(id)) {
+        this.disposeGroupChildren(vis.group);
+        this.scene.remove(vis.group);
+        this.projectileVisuals.delete(id);
+      }
+    }
+  }
+
+  private powerUpColor(type: PowerUpType): number {
+    if (type === 'lightning') return 0xfacc15;
+    if (type === 'fist') return 0xf97316;
+    if (type === 'shrink') return 0x34d399;
+    if (type === 'triple_throw') return 0xc084fc;
+    return 0xfbbf24;
+  }
+
+  private createPowerUpVisual(type: PowerUpType): {
+    group: THREE.Group;
+    core: THREE.Group;
+    ring: THREE.Mesh;
+    groundGlow: THREE.Mesh;
+    type: PowerUpType;
+  } {
+    const group = new THREE.Group();
+    const core = new THREE.Group();
+    const col = this.powerUpColor(type);
+
+    // Outer translucent capsule orb
+    const shell = new THREE.Mesh(
+      this.sharedSphereGeo,
+      new THREE.MeshPhysicalMaterial({
+        color: col,
+        emissive: col,
+        emissiveIntensity: 0.25,
+        roughness: 0.15,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.26,
+        depthWrite: false,
+      })
+    );
+    shell.scale.setScalar(0.42);
+    core.add(shell);
+
+    // Orbiting glow ring
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.48, 0.032, 8, 24),
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.85 })
+    );
+    ring.rotation.x = Math.PI / 3;
+    core.add(ring);
+
+    const emblemMat = new THREE.MeshStandardMaterial({
+      color: col,
+      emissive: col,
+      emissiveIntensity: 0.9,
+      roughness: 0.22,
+      metalness: 0.35,
+    });
+
+    if (type === 'lightning') {
+      // Sharp 3-segment zigzag lightning bolt
+      const seg1 = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.28, 0.09), emblemMat);
+      seg1.position.set(0.05, 0.14, 0);
+      seg1.rotation.z = -0.35;
+      const seg2 = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.1, 0.09), emblemMat);
+      seg2.position.set(0, 0.01, 0);
+      seg2.rotation.z = 0.22;
+      const seg3 = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.28, 0.09), emblemMat);
+      seg3.position.set(-0.05, -0.14, 0);
+      seg3.rotation.z = -0.38;
+      core.add(seg1, seg2, seg3);
+    } else if (type === 'fist') {
+      // Stylized Power Fist
+      const palm = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.24, 0.18), emblemMat);
+      palm.position.y = -0.02;
+      core.add(palm);
+      for (let k = 0; k < 4; k++) {
+        const kn = new THREE.Mesh(this.sharedSphereGeo, emblemMat);
+        kn.scale.setScalar(0.058);
+        kn.position.set(-0.11 + k * 0.075, 0.13, 0);
+        core.add(kn);
+      }
+      const cuff = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.11, 0.13, 0.14, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xf59e0b, emissiveIntensity: 0.7 })
+      );
+      cuff.position.y = -0.18;
+      core.add(cuff);
+    } else if (type === 'shrink') {
+      // Mini Mushroom (Nấm lùn)
+      const stalk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.09, 0.12, 0.22, 12),
+        new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.45 })
+      );
+      stalk.position.y = -0.12;
+      const cap = new THREE.Mesh(
+        this.sharedSphereGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0x10b981,
+          emissive: 0x059669,
+          emissiveIntensity: 0.65,
+          roughness: 0.3,
+        })
+      );
+      cap.scale.set(0.28, 0.18, 0.28);
+      cap.position.y = 0.06;
+      core.add(stalk, cap);
+      const spotMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
+      for (let s = 0; s < 4; s++) {
+        const a = (s * Math.PI) / 2;
+        const spot = new THREE.Mesh(this.sharedSphereGeo, spotMat);
+        spot.scale.setScalar(0.045);
+        spot.position.set(Math.cos(a) * 0.16, 0.13, Math.sin(a) * 0.16);
+        core.add(spot);
+      }
+    } else if (type === 'triple_throw') {
+      // Dấu X (Triple J+D Throw multiplier)
+      const barA = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.095, 0.095), emblemMat);
+      barA.rotation.z = Math.PI / 4;
+      const barB = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.095, 0.095), emblemMat);
+      barB.rotation.z = -Math.PI / 4;
+      core.add(barA, barB);
+      const dotMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+      for (let d = 0; d < 3; d++) {
+        const dot = new THREE.Mesh(this.sharedSphereGeo, dotMat);
+        dot.scale.setScalar(0.055);
+        dot.position.set((d - 1) * 0.16, 0.24, 0);
+        core.add(dot);
+      }
+    } else {
+      // Tăng trưởng (Growth Crystal + Upward Arrow)
+      const prism = new THREE.Mesh(new THREE.OctahedronGeometry(0.2, 0), emblemMat);
+      prism.scale.set(0.95, 1.35, 0.95);
+      const arrowHead = new THREE.Mesh(
+        new THREE.ConeGeometry(0.18, 0.22, 6),
+        new THREE.MeshStandardMaterial({ color: 0x4ade80, emissive: 0x22c55e, emissiveIntensity: 0.85 })
+      );
+      arrowHead.position.y = 0.24;
+      core.add(prism, arrowHead);
+    }
+
+    group.add(core);
+
+    // Ground beacon ring directly on arena floor
+    const groundGlow = new THREE.Mesh(
+      new THREE.RingGeometry(0.28, 0.44, 24),
+      new THREE.MeshBasicMaterial({
+        color: col,
+        transparent: true,
+        opacity: 0.55,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    groundGlow.rotation.x = -Math.PI / 2;
+    group.add(groundGlow);
+
+    return { group, core, ring, groundGlow, type };
+  }
+
+  private syncPowerUps(match: MatchState, dt: number): void {
+    const activeIds = new Set<number>();
+    const items = match.powerUps ?? [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      activeIds.add(item.id);
+      let vis = this.powerUpVisuals.get(item.id);
+      if (!vis) {
+        vis = this.createPowerUpVisual(item.type);
+        this.scene.add(vis.group);
+        this.powerUpVisuals.set(item.id, vis);
+      }
+
+      const bob = item.onGround ? Math.sin(this.elapsed * 3.8 + item.bobPhase) * 0.12 : 0;
+      vis.group.position.set(item.x, 0, 0);
+      vis.core.position.set(0, item.y + bob, 0.1);
+      vis.core.rotation.y += dt * 2.2;
+      vis.ring.rotation.z += dt * 3.0;
+
+      // Blink gently when about to expire (< 2.2s left)
+      const blink = item.life < 2.2 ? (Math.sin(this.elapsed * 22) > 0 ? 1 : 0.3) : 1;
+      vis.core.scale.setScalar(blink);
+
+      vis.groundGlow.position.set(0, FLOOR_Y + 0.024, 0.1);
+      const pulse = 0.85 + Math.sin(this.elapsed * 5 + item.bobPhase) * 0.15;
+      vis.groundGlow.scale.setScalar(pulse);
+    }
+
+    for (const [id, vis] of this.powerUpVisuals.entries()) {
+      if (!activeIds.has(id)) {
+        this.disposeGroupChildren(vis.group);
+        this.scene.remove(vis.group);
+        this.powerUpVisuals.delete(id);
+      }
+    }
+  }
+
+  public startStageOutro(stage: ArenaStageId, winnerId: 1 | 2): void {
+    this.clearStageOutro();
+    if (!this.latestMatch) return;
+
+    const victor = winnerId === 1 ? this.latestMatch.p1 : this.latestMatch.p2;
+    const vx = victor.x;
+    const group = new THREE.Group();
+    group.position.set(vx, FLOOR_Y, 0);
+
+    let updateFn: (elapsed: number, dt: number, victorRig: FighterRig, victor: FighterState) => void;
+
+    if (stage === 'bloodstream') {
+      // Mạch máu — Được hấp thu vào máu (Crimson arterial plasma vortex + swirling hemoglobin portal)
+      const portalRings: THREE.Mesh[] = [];
+      const ringCols = [0xf43f5e, 0xfb7185, 0xfbbf24, 0xe11d48];
+      for (let i = 0; i < 4; i++) {
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(1.1 + i * 0.36, 0.055, 12, 42),
+          new THREE.MeshBasicMaterial({
+            color: ringCols[i],
+            transparent: true,
+            opacity: 0.78 - i * 0.12,
+          })
+        );
+        ring.position.set(0, 1.65, -0.55 - i * 0.18);
+        group.add(ring);
+        portalRings.push(ring);
+      }
+
+      const plasmaCore = new THREE.Mesh(
+        new THREE.CircleGeometry(1.05, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0xbe123c,
+          transparent: true,
+          opacity: 0.45,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      plasmaCore.position.set(0, 1.65, -0.58);
+      group.add(plasmaCore);
+
+      const streamRibbons: THREE.Mesh[] = [];
+      for (let k = 0; k < 14; k++) {
+        const droplet = new THREE.Mesh(
+          this.sharedSphereGeo,
+          new THREE.MeshBasicMaterial({
+            color: k % 3 === 0 ? 0xfbbf24 : 0xfb7185,
+            transparent: true,
+            opacity: 0.85,
+          })
+        );
+        droplet.scale.set(0.11, 0.07, 0.11);
+        group.add(droplet);
+        streamRibbons.push(droplet);
+      }
+
+      updateFn = (elapsed, dt, victorRig) => {
+        for (let i = 0; i < portalRings.length; i++) {
+          const r = portalRings[i];
+          r.rotation.z += dt * (1.8 + i * 0.55) * (i % 2 === 0 ? 1 : -1);
+          const s = 0.85 + Math.sin(elapsed * 4 + i) * 0.12;
+          r.scale.setScalar(s);
+        }
+        plasmaCore.scale.setScalar(1 + Math.sin(elapsed * 5) * 0.08);
+
+        for (let k = 0; k < streamRibbons.length; k++) {
+          const angle = elapsed * 4.5 + (k * Math.PI * 2) / streamRibbons.length;
+          const rad = Math.max(0.15, 1.8 - ((elapsed * 0.65 + k * 0.12) % 1.65));
+          streamRibbons[k].position.set(
+            Math.cos(angle) * rad,
+            1.65 + Math.sin(angle) * rad * 0.8,
+            -0.45 + (1.8 - rad) * 0.25
+          );
+        }
+
+        // Levitate victor and smoothly dissolve/absorb into the arterial bloodstream vortex
+        const absorbT = Math.max(0, Math.min(1, (elapsed - 0.85) / 2.2));
+        const ease = absorbT * absorbT * (3 - 2 * absorbT);
+        victorRig.group.position.set(
+          vx,
+          FLOOR_Y + 0.55 * Math.min(1, elapsed / 0.7) + ease * 0.85,
+          -ease * 0.55
+        );
+        victorRig.group.rotation.y = elapsed * 2.4;
+        victorRig.group.scale.setScalar(Math.max(0.06, victorRig.currentScale * (1 - ease * 0.92)));
+        victorRig.shadowDisc.scale.setScalar(Math.max(0.05, 1 - ease));
+
+        this.outroState.sparkTimer -= dt;
+        if (this.outroState.sparkTimer <= 0) {
+          this.outroState.sparkTimer = 0.09;
+          this.spawnBurst(vx, FLOOR_Y + 1.65, 0.1, 4, 0xf43f5e, 3.4, 0.85, -1.2, 0.55, 0.4);
+          this.spawnBurst(vx, FLOOR_Y + 1.65, 0.1, 2, 0xfbbf24, 2.8, 0.7, -0.8, 0.5, 0.6);
+        }
+      };
+    } else if (stage === 'flask') {
+      // Bình cầu — Kết tinh lấp lánh (Nucleating glowing diamond/teal crystal lattice)
+      const crystals: { mesh: THREE.Mesh; maxScale: number; delay: number }[] = [];
+      const crystalCols = [0x2dd4bf, 0x99f6e4, 0x38bdf8, 0xfef08a];
+      for (let i = 0; i < 12; i++) {
+        const angle = (i / 12) * Math.PI * 2;
+        const dist = 0.95 + (i % 3) * 0.35;
+        const cMat = new THREE.MeshPhysicalMaterial({
+          color: crystalCols[i % crystalCols.length],
+          emissive: crystalCols[i % crystalCols.length],
+          emissiveIntensity: 0.75,
+          roughness: 0.08,
+          metalness: 0.25,
+          transparent: true,
+          opacity: 0.82,
+          clearcoat: 1.0,
+        });
+        const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.45, 0), cMat);
+        shard.scale.set(0.6, 1.85, 0.6);
+        shard.position.set(Math.cos(angle) * dist, 0.55 + (i % 2) * 0.35, Math.sin(angle) * dist * 0.75);
+        shard.rotation.set((i % 2 === 0 ? 1 : -1) * 0.22, angle, (Math.cos(angle) * -0.25));
+        shard.scale.setScalar(0.01);
+        group.add(shard);
+        crystals.push({ mesh: shard, maxScale: 0.85 + (i % 3) * 0.22, delay: i * 0.07 });
+      }
+
+      const prismRing = new THREE.Mesh(
+        new THREE.TorusGeometry(1.55, 0.045, 10, 48),
+        new THREE.MeshBasicMaterial({ color: 0x99f6e4, transparent: true, opacity: 0.85 })
+      );
+      prismRing.rotation.x = Math.PI / 2;
+      prismRing.position.y = 0.06;
+      group.add(prismRing);
+
+      updateFn = (elapsed, dt, victorRig) => {
+        for (const c of crystals) {
+          const tLocal = Math.max(0, Math.min(1, (elapsed - c.delay) / 0.85));
+          const ease = 1 - Math.pow(1 - tLocal, 3);
+          const s = Math.max(0.01, c.maxScale * ease);
+          c.mesh.scale.set(s * 0.58, s * 1.85, s * 0.58);
+          const mat = c.mesh.material as THREE.MeshPhysicalMaterial;
+          mat.emissiveIntensity = 0.65 + Math.sin(elapsed * 10 + c.delay * 8) * 0.35;
+        }
+        prismRing.rotation.z += dt * 2.2;
+        victorRig.group.position.set(vx, FLOOR_Y + 0.28 + Math.sin(elapsed * 3) * 0.08, 0);
+        victorRig.group.rotation.y = Math.sin(elapsed * 1.8) * 0.35;
+
+        this.outroState.sparkTimer -= dt;
+        if (this.outroState.sparkTimer <= 0) {
+          this.outroState.sparkTimer = 0.08;
+          this.spawnBurst(
+            vx + (Math.random() - 0.5) * 2.2,
+            FLOOR_Y + 0.5 + Math.random() * 2.3,
+            0.3,
+            4,
+            0xffffff,
+            2.6,
+            0.9,
+            1.2,
+            0.52,
+            1.4
+          );
+          this.spawnBurst(
+            vx + (Math.random() - 0.5) * 1.8,
+            FLOOR_Y + 0.8 + Math.random() * 1.8,
+            0.2,
+            3,
+            0x2dd4bf,
+            3.1,
+            0.85,
+            2.5,
+            0.55,
+            1.8
+          );
+        }
+      };
+    } else if (stage === 'receptor') {
+      // Đích tác động — Được gắn vào thụ thể (Golden GPCR lock-and-key binding pocket + signal shockwave)
+      const pocketRing = new THREE.Mesh(
+        new THREE.TorusGeometry(1.35, 0.1, 14, 48),
+        new THREE.MeshStandardMaterial({
+          color: 0xfacc15,
+          emissive: 0xeab308,
+          emissiveIntensity: 0.95,
+          metalness: 0.75,
+          roughness: 0.2,
+        })
+      );
+      pocketRing.rotation.x = Math.PI / 2;
+      pocketRing.position.y = 0.15;
+      group.add(pocketRing);
+
+      const lockAura = new THREE.Mesh(
+        new THREE.TorusGeometry(1.15, 0.055, 12, 42),
+        new THREE.MeshBasicMaterial({ color: 0xc084fc, transparent: true, opacity: 0.88 })
+      );
+      lockAura.position.set(0, 1.55, 0);
+      group.add(lockAura);
+
+      const signalWave = new THREE.Mesh(
+        new THREE.TorusGeometry(1.0, 0.06, 10, 48),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.8 })
+      );
+      signalWave.rotation.x = Math.PI / 2;
+      signalWave.position.y = 0.08;
+      group.add(signalWave);
+
+      const helices: THREE.Mesh[] = [];
+      for (let i = 0; i < 4; i++) {
+        const a = (i * Math.PI) / 2 + Math.PI / 4;
+        const pillar = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.14, 0.18, 2.8, 12),
+          new THREE.MeshStandardMaterial({
+            color: 0xa855f7,
+            emissive: 0x7e22ce,
+            emissiveIntensity: 0.7,
+            roughness: 0.25,
+          })
+        );
+        pillar.position.set(Math.cos(a) * 1.45, 1.4, Math.sin(a) * 1.15);
+        group.add(pillar);
+        helices.push(pillar);
+      }
+
+      updateFn = (elapsed, dt, victorRig) => {
+        const dockT = Math.min(1, elapsed / 1.15);
+        const ease = 1 - Math.pow(1 - dockT, 3);
+        // Smoothly dock into the golden binding cradle & lock in place
+        victorRig.group.position.set(vx, FLOOR_Y + (1 - ease) * 0.75 + 0.06, 0);
+        victorRig.group.rotation.y = (1 - ease) * Math.PI * 0.6;
+
+        lockAura.rotation.x = elapsed * 2.2;
+        lockAura.rotation.y += dt * 2.8;
+        lockAura.scale.setScalar(1.35 - ease * 0.38);
+
+        pocketRing.rotation.z += dt * 1.8;
+
+        // Expanding biological signal transduction wave once locked
+        const waveCycle = (elapsed * 0.9) % 1;
+        signalWave.scale.setScalar(0.8 + waveCycle * 2.4);
+        (signalWave.material as THREE.MeshBasicMaterial).opacity = (1 - waveCycle) * 0.85;
+
+        for (let i = 0; i < helices.length; i++) {
+          helices[i].scale.y = 0.75 + ease * 0.3 + Math.sin(elapsed * 4 + i) * 0.05;
+        }
+
+        this.outroState.sparkTimer -= dt;
+        if (this.outroState.sparkTimer <= 0) {
+          this.outroState.sparkTimer = 0.1;
+          this.spawnBurst(vx, FLOOR_Y + 1.4, 0.15, 4, 0xfacc15, 3.6, 0.85, 3.2, 0.45, 1.6);
+          this.spawnBurst(vx, FLOOR_Y + 1.4, 0.15, 3, 0xc084fc, 3.2, 0.8, 2.5, 0.5, 1.2);
+        }
+      };
+    } else {
+      // Tế bào — Được vào nhân để chuyển hoá (Nuclear Pore Complex & glowing Nucleus envelope)
+      const nucleusShell = new THREE.Mesh(
+        new THREE.SphereGeometry(1.95, 22, 16),
+        new THREE.MeshPhysicalMaterial({
+          color: 0x0ea5e9,
+          emissive: 0x1d4ed8,
+          emissiveIntensity: 0.45,
+          roughness: 0.18,
+          transparent: true,
+          opacity: 0.24,
+          wireframe: true,
+        })
+      );
+      nucleusShell.position.set(0, 1.55, 0);
+      group.add(nucleusShell);
+
+      const poreRingA = new THREE.Mesh(
+        new THREE.TorusGeometry(1.45, 0.06, 12, 48),
+        new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85 })
+      );
+      poreRingA.position.set(0, 1.55, 0);
+      const poreRingB = new THREE.Mesh(
+        new THREE.TorusGeometry(1.22, 0.045, 12, 48),
+        new THREE.MeshBasicMaterial({ color: 0x34d399, transparent: true, opacity: 0.85 })
+      );
+      poreRingB.position.set(0, 1.55, 0);
+      group.add(poreRingA, poreRingB);
+
+      const enzymeNodes: THREE.Mesh[] = [];
+      for (let i = 0; i < 10; i++) {
+        const node = new THREE.Mesh(
+          this.sharedSphereGeo,
+          new THREE.MeshBasicMaterial({
+            color: i % 2 === 0 ? 0x34d399 : 0xfacc15,
+          })
+        );
+        node.scale.setScalar(0.095);
+        group.add(node);
+        enzymeNodes.push(node);
+      }
+
+      updateFn = (elapsed, dt, victorRig) => {
+        const enterT = Math.min(1, elapsed / 1.2);
+        const ease = 1 - Math.pow(1 - enterT, 3);
+        nucleusShell.rotation.y += dt * 0.65;
+        nucleusShell.scale.setScalar(0.35 + ease * 0.68);
+        poreRingA.rotation.x += dt * 1.9;
+        poreRingA.rotation.y += dt * 1.2;
+        poreRingB.rotation.z -= dt * 2.4;
+        poreRingB.rotation.x -= dt * 1.1;
+
+        for (let i = 0; i < enzymeNodes.length; i++) {
+          const a = elapsed * 2.8 + (i * Math.PI * 2) / enzymeNodes.length;
+          enzymeNodes[i].position.set(
+            Math.cos(a) * 1.35,
+            1.55 + Math.sin(a * 1.5) * 0.75,
+            Math.sin(a) * 1.1
+          );
+        }
+
+        // Ascend into nucleus core and undergo luminous biotransformation pulse
+        victorRig.group.position.set(vx, FLOOR_Y + ease * 0.48 + Math.sin(elapsed * 2.5) * 0.08, 0);
+        victorRig.group.rotation.y += dt * 1.6;
+        const pulseScale = victorRig.currentScale * (0.94 + Math.sin(elapsed * 6) * 0.06);
+        victorRig.group.scale.setScalar(pulseScale);
+
+        this.outroState.sparkTimer -= dt;
+        if (this.outroState.sparkTimer <= 0) {
+          this.outroState.sparkTimer = 0.095;
+          this.spawnBurst(vx, FLOOR_Y + 1.55, 0.2, 4, 0x38bdf8, 3.0, 0.85, -1.0, 0.55, 1.0);
+          this.spawnBurst(vx, FLOOR_Y + 1.55, 0.2, 3, 0x34d399, 2.8, 0.8, -0.8, 0.55, 1.2);
+        }
+      };
+    }
+
+    this.scene.add(group);
+    this.outroState = {
+      active: true,
+      stage,
+      winnerId,
+      elapsed: 0,
+      sparkTimer: 0,
+      group,
+      update: updateFn,
+    };
+  }
+
+  public clearStageOutro(): void {
+    if (this.outroState.group) {
+      this.disposeGroupChildren(this.outroState.group);
+      this.scene.remove(this.outroState.group);
+    }
+    this.outroState = {
+      active: false,
+      stage: this.activeStageId,
+      winnerId: 1,
+      elapsed: 0,
+      sparkTimer: 0,
+      group: null,
+      update: null,
+    };
+    this.p1Rig.group.rotation.y = 0;
+    this.p2Rig.group.rotation.y = 0;
+    this.p1Rig.group.scale.setScalar(1);
+    this.p2Rig.group.scale.setScalar(1);
+    this.p1Rig.currentScale = 1;
+    this.p2Rig.currentScale = 1;
+  }
+
   public projectToScreen(worldX: number, worldY: number): { x: number; y: number } | null {
     _vec3A.set(worldX, worldY, 0).project(this.camera);
     if (_vec3A.z < -1 || _vec3A.z > 1) return null;
@@ -1452,6 +2200,22 @@ export class ArenaRenderer {
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
     this.resizeObserver.disconnect();
+    this.clearStageOutro();
+    if (this.activeStage) {
+      this.scene.remove(this.activeStage.group);
+      this.activeStage.dispose();
+      this.activeStage = null;
+    }
+    for (const [, vis] of this.projectileVisuals.entries()) {
+      this.disposeGroupChildren(vis.group);
+      this.scene.remove(vis.group);
+    }
+    this.projectileVisuals.clear();
+    for (const [, vis] of this.powerUpVisuals.entries()) {
+      this.disposeGroupChildren(vis.group);
+      this.scene.remove(vis.group);
+    }
+    this.powerUpVisuals.clear();
     this.sharedSphereGeo.dispose();
     this.sharedCylGeo.dispose();
     this.renderer.dispose();

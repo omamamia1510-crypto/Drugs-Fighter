@@ -1,3 +1,6 @@
+import type { ArenaStageId } from '../game/arenaStages';
+import type { PowerUpType } from '../game/combatEngine';
+
 export class SoundEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -322,6 +325,150 @@ export class SoundEngine {
       gain.connect(this.masterGain!);
       osc.start(t);
       osc.stop(t + 0.46);
+    });
+  }
+
+  public playThrow(): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    if (this.noiseBuffer) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.Q.setValueAtTime(3.2, now);
+      filter.frequency.setValueAtTime(900, now);
+      filter.frequency.exponentialRampToValueAtTime(2400, now + 0.14);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.24, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain);
+      src.start(now);
+      src.stop(now + 0.18);
+    }
+
+    const osc = ctx.createOscillator();
+    const oGain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(this.randPitch(480), now);
+    osc.frequency.exponentialRampToValueAtTime(960, now + 0.13);
+    oGain.gain.setValueAtTime(0.16, now);
+    oGain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc.connect(oGain);
+    oGain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  }
+
+  public playDecompose(): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    // Chemical effervescence / bond-dissolution fizz
+    if (this.noiseBuffer) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.Q.setValueAtTime(1.8, now);
+      filter.frequency.setValueAtTime(2800, now);
+      filter.frequency.exponentialRampToValueAtTime(520, now + 0.48);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.28, now + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain);
+      src.start(now);
+      src.stop(now + 0.52);
+    }
+
+    // Descending crystalline bond-snapping arpeggio
+    [980, 740, 540, 360].forEach((freq, idx) => {
+      const t = now + idx * 0.065;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(this.randPitch(freq, 0.05), t);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.65, t + 0.16);
+      gain.gain.setValueAtTime(0.11, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.17);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(t);
+      osc.stop(t + 0.18);
+    });
+  }
+
+  public playPowerUpPickup(type: PowerUpType): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const scale =
+      type === 'lightning'
+        ? [660, 880, 1320]
+        : type === 'fist'
+        ? [293.66, 440, 587.33]
+        : type === 'shrink'
+        ? [523.25, 783.99, 1046.5]
+        : type === 'triple_throw'
+        ? [493.88, 739.99, 987.77]
+        : [220, 329.63, 440, 659.25];
+
+    scale.forEach((freq, idx) => {
+      const t = now + idx * 0.055;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type === 'fist' || type === 'giant' ? 'sawtooth' : 'triangle';
+      osc.frequency.setValueAtTime(this.randPitch(freq, 0.03), t);
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.14, t + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(t);
+      osc.stop(t + 0.24);
+    });
+  }
+
+  public playStageOutro(stage: ArenaStageId): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    const chord =
+      stage === 'flask'
+        ? [587.33, 880, 1174.66, 1760] // sparkling crystal shimmer
+        : stage === 'bloodstream'
+        ? [261.63, 392.0, 523.25, 659.25] // warm arterial swell
+        : stage === 'receptor'
+        ? [349.23, 523.25, 698.46, 1046.5] // resonant lock-and-key lock
+        : [329.63, 493.88, 659.25, 987.77]; // nuclear bio-transform
+
+    chord.forEach((freq, idx) => {
+      const t = now + idx * 0.11;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = stage === 'flask' ? 'sine' : 'triangle';
+      osc.frequency.setValueAtTime(freq, t);
+      if (stage === 'bloodstream') {
+        osc.frequency.exponentialRampToValueAtTime(freq * 1.03, t + 0.7);
+      }
+      gain.gain.setValueAtTime(0.001, t);
+      gain.gain.linearRampToValueAtTime(0.15, t + 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.85);
+      osc.connect(gain);
+      gain.connect(this.masterGain!);
+      osc.start(t);
+      osc.stop(t + 0.88);
     });
   }
 

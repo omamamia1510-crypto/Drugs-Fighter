@@ -5,6 +5,7 @@ import type { MatchState } from '../game/combatEngine';
 interface StatusModalProps {
   mode: 'paused' | 'gameover';
   match: MatchState;
+  onlineRole?: 1 | 2 | null;
   onResume: () => void;
   onRematch: () => void;
   onReturnToTitle: () => void;
@@ -13,6 +14,7 @@ interface StatusModalProps {
 export const StatusModal: React.FC<StatusModalProps> = ({
   mode,
   match,
+  onlineRole = null,
   onResume,
   onRematch,
   onReturnToTitle,
@@ -106,7 +108,7 @@ export const StatusModal: React.FC<StatusModalProps> = ({
                 className="font-display flex w-full items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-5 py-2.5 text-sm font-semibold tracking-wide text-slate-200 transition-colors hover:bg-slate-800 hover:text-white"
               >
                 <Swords className="h-4 w-4" />
-                CHỌN VŨ KHÍ & CHẾ ĐỘ
+                {onlineRole ? 'PHÒNG CHỜ ONLINE (CHỌN VŨ KHÍ)' : 'CHỌN VŨ KHÍ & CHẾ ĐỘ'}
               </button>
             </div>
           </>

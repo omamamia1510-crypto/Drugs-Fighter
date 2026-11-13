@@ -1,7 +1,9 @@
 import React from 'react';
-import { FlaskConical, Play, Volume2, VolumeX } from 'lucide-react';
+import { CheckCircle2, FlaskConical, LogOut, Play, QrCode, Volume2, VolumeX, Wifi } from 'lucide-react';
 import { DRUG_PRESETS, type ParsedMolecule } from '../chem/smilesEngine';
+import { ARENA_STAGES, getArenaStageInfo, type ArenaStageId } from '../game/arenaStages';
 import type { ColorSchemeMode, CpuDifficulty, PlayMode } from '../game/combatEngine';
+import type { OnlineRoomSnapshot } from '../net/onlineProtocol';
 
 interface TitleScreenProps {
   p1Weapon: ParsedMolecule;
@@ -9,33 +11,60 @@ interface TitleScreenProps {
   playMode: PlayMode;
   difficulty: CpuDifficulty;
   colorMode: ColorSchemeMode;
+  arenaStage: ArenaStageId;
   muted: boolean;
+  onlineRole: 1 | 2 | null;
+  onlineRoom: OnlineRoomSnapshot | null;
+  onlineError: string | null;
   onSelectPreset: (playerId: 1 | 2, smiles: string, name: string) => void;
   onOpenCustomSmiles: (playerId: 1 | 2) => void;
   onChangePlayMode: (mode: PlayMode) => void;
   onChangeDifficulty: (diff: CpuDifficulty) => void;
   onChangeColorMode: (mode: ColorSchemeMode) => void;
+  onChangeStage: (stage: ArenaStageId) => void;
   onToggleMute: () => void;
   onStart: () => void;
+  onCreateOnlineRoom: () => void;
+  onOpenInviteModal: () => void;
+  onToggleReady: () => void;
+  onLeaveOnlineRoom: () => void;
 }
 
 const FighterLoadoutCard: React.FC<{
   playerId: 1 | 2;
   weapon: ParsedMolecule;
+  roleLabel?: string;
+  locked?: boolean;
+  lockedHint?: string;
+  highlighted?: boolean;
   onSelectPreset: (smiles: string, name: string) => void;
   onOpenCustom: () => void;
-}> = ({ playerId, weapon, onSelectPreset, onOpenCustom }) => {
+}> = ({
+  playerId,
+  weapon,
+  roleLabel,
+  locked = false,
+  lockedHint,
+  highlighted = false,
+  onSelectPreset,
+  onOpenCustom,
+}) => {
   const isP1 = playerId === 1;
   const accent = isP1 ? '#38bdf8' : '#f43f5e';
-  const borderCol = isP1 ? 'rgba(56, 189, 248, 0.4)' : 'rgba(244, 63, 94, 0.4)';
+  const borderCol = highlighted
+    ? accent
+    : isP1
+    ? 'rgba(56, 189, 248, 0.4)'
+    : 'rgba(244, 63, 94, 0.4)';
 
   return (
     <section
       aria-label={`Trang bị Player ${playerId}`}
       className="pointer-events-auto w-full max-w-[330px] rounded-xl border p-3.5"
       style={{
-        backgroundColor: 'rgba(7, 13, 28, 0.88)',
+        backgroundColor: 'rgba(7, 13, 28, 0.9)',
         borderColor: borderCol,
+        boxShadow: highlighted ? `0 0 24px ${isP1 ? 'rgba(56,189,248,0.22)' : 'rgba(244,63,94,0.25)'}` : undefined,
       }}
     >
       <div className="flex items-start gap-3">
@@ -50,7 +79,7 @@ const FighterLoadoutCard: React.FC<{
               className="font-display text-xs font-bold tracking-wider"
               style={{ color: accent }}
             >
-              PLAYER {playerId} {isP1 ? '· AZURE' : '· CRIMSON'}
+              {roleLabel ?? `PLAYER ${playerId} ${isP1 ? '· AZURE' : '· CRIMSON'}`}
             </span>
             <span className="font-mono-tabular text-xs font-semibold text-slate-400">
               {weapon.formula}
@@ -85,35 +114,41 @@ const FighterLoadoutCard: React.FC<{
         </div>
       </div>
 
-      {/* Preset Drug Selector */}
-      <div className="mt-2.5 flex flex-wrap gap-1.5">
-        {DRUG_PRESETS.slice(0, 6).map((preset) => {
-          const active = weapon.smiles === preset.smiles;
-          return (
-            <button
-              key={preset.id}
-              type="button"
-              onClick={() => onSelectPreset(preset.smiles, preset.name)}
-              className={`rounded-md px-2 py-1 text-[11px] font-semibold whitespace-nowrap transition-colors ${
-                active
-                  ? 'text-slate-950'
-                  : 'border border-slate-800 bg-slate-900/90 text-slate-300 hover:border-slate-600 hover:text-white'
-              }`}
-              style={active ? { backgroundColor: accent } : undefined}
-            >
-              {preset.name}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={onOpenCustom}
-          className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] font-semibold text-slate-200 transition-colors hover:border-sky-400 hover:text-white"
-        >
-          <FlaskConical className="h-3 w-3" style={{ color: accent }} aria-hidden="true" />
-          SMILES Tuỳ chỉnh
-        </button>
-      </div>
+      {/* Preset Drug Selector or Locked Peer Info */}
+      {locked ? (
+        <div className="mt-2.5 rounded-lg border border-slate-800 bg-slate-950/90 px-3 py-2 text-center text-[11px] font-medium text-slate-400">
+          {lockedHint ?? 'Đồng bộ trực tiếp từ người chơi còn lại'}
+        </div>
+      ) : (
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          {DRUG_PRESETS.slice(0, 6).map((preset) => {
+            const active = weapon.smiles === preset.smiles;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => onSelectPreset(preset.smiles, preset.name)}
+                className={`rounded-md px-2 py-1 text-[11px] font-semibold whitespace-nowrap transition-colors ${
+                  active
+                    ? 'text-slate-950'
+                    : 'border border-slate-800 bg-slate-900/90 text-slate-300 hover:border-slate-600 hover:text-white'
+                }`}
+                style={active ? { backgroundColor: accent } : undefined}
+              >
+                {preset.name}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            onClick={onOpenCustom}
+            className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] font-semibold text-slate-200 transition-colors hover:border-sky-400 hover:text-white"
+          >
+            <FlaskConical className="h-3 w-3" style={{ color: accent }} aria-hidden="true" />
+            SMILES Tuỳ chỉnh
+          </button>
+        </div>
+      )}
     </section>
   );
 };
@@ -124,15 +159,25 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
   playMode,
   difficulty,
   colorMode,
+  arenaStage,
   muted,
+  onlineRole,
+  onlineRoom,
+  onlineError,
   onSelectPreset,
   onOpenCustomSmiles,
   onChangePlayMode,
   onChangeDifficulty,
   onChangeColorMode,
+  onChangeStage,
   onToggleMute,
   onStart,
+  onCreateOnlineRoom,
+  onOpenInviteModal,
+  onToggleReady,
+  onLeaveOnlineRoom,
 }) => {
+  const activeStageInfo = getArenaStageInfo(arenaStage);
   return (
     <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-5 md:p-7">
       {/* Top Bar: Bespoke Inline SVG Title Lockup over calm negative space + Mute button */}
@@ -221,102 +266,259 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
           <FighterLoadoutCard
             playerId={1}
             weapon={p1Weapon}
+            roleLabel={
+              onlineRole === 1
+                ? 'P1 · BẠN (CHỦ PHÒNG)'
+                : onlineRole === 2
+                ? 'P1 · CHỦ PHÒNG (HOST)'
+                : undefined
+            }
+            locked={onlineRole === 2}
+            lockedHint={
+              onlineRoom?.p1.connected
+                ? 'Host P1 đang điều chỉnh vũ khí'
+                : 'Đang chờ Host kết nối lại...'
+            }
+            highlighted={onlineRole === 1}
             onSelectPreset={(s, n) => onSelectPreset(1, s, n)}
             onOpenCustom={() => onOpenCustomSmiles(1)}
           />
 
           {/* Center Controls & Primary Start CTA */}
           <div
-            className="pointer-events-auto flex w-full max-w-[300px] flex-col items-center gap-3 rounded-xl border border-slate-700/80 p-4"
-            style={{ backgroundColor: 'rgba(7, 13, 28, 0.9)' }}
+            className="pointer-events-auto flex w-full max-w-[336px] flex-col items-center gap-2.5 rounded-xl border border-slate-700/80 p-3.5"
+            style={{ backgroundColor: 'rgba(7, 13, 28, 0.92)' }}
           >
-            <button
-              type="button"
-              data-start="true"
-              onClick={(e) => {
-                e.currentTarget.blur();
-                onStart();
-              }}
-              className="font-display flex w-full items-center justify-center gap-2 rounded-lg bg-sky-400 px-6 py-3 text-lg font-bold tracking-wider text-slate-950 shadow-lg transition-colors hover:bg-sky-300 focus-visible:outline-2 focus-visible:outline-white"
-            >
-              <Play className="h-5 w-5 fill-current" aria-hidden="true" />
-              BẮT ĐẦU ĐẤU
-            </button>
-
-            {/* Mode Switch */}
-            <div className="w-full space-y-2">
-              <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-                <button
-                  type="button"
-                  onClick={() => onChangePlayMode('1p')}
-                  className={`rounded-md py-1.5 text-xs font-bold transition-colors ${
-                    playMode === '1p'
-                      ? 'bg-slate-100 text-slate-950'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  1P VS CPU
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onChangePlayMode('2p')}
-                  className={`rounded-md py-1.5 text-xs font-bold transition-colors ${
-                    playMode === '2p'
-                      ? 'bg-slate-100 text-slate-950'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  2P LOCAL
-                </button>
+            {onlineError && (
+              <div className="w-full rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-center text-xs font-medium text-rose-200">
+                {onlineError}
               </div>
+            )}
 
-              {/* CPU Difficulty */}
-              {playMode === '1p' && (
-                <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-                  {(['easy', 'normal', 'hard'] as const).map((lvl) => (
+            {onlineRole === null ? (
+              <>
+                <button
+                  type="button"
+                  data-start="true"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onStart();
+                  }}
+                  className="font-display flex w-full items-center justify-center gap-2 rounded-lg bg-sky-400 px-6 py-3 text-lg font-bold tracking-wider text-slate-950 shadow-lg transition-colors hover:bg-sky-300 focus-visible:outline-2 focus-visible:outline-white"
+                >
+                  <Play className="h-5 w-5 fill-current" aria-hidden="true" />
+                  BẮT ĐẦU ĐẤU
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="create-online-room"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    onCreateOnlineRoom();
+                  }}
+                  className="font-display flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-400/50 bg-emerald-500/15 px-4 py-2 text-xs font-bold tracking-wider text-emerald-300 transition-colors hover:bg-emerald-500/25 hover:text-white"
+                >
+                  <QrCode className="h-4 w-4" aria-hidden="true" />
+                  MỜI BẠN SOLO ONLINE (QR / LINK)
+                </button>
+
+                {/* Mode Switch */}
+                <div className="w-full space-y-2">
+                  <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
                     <button
-                      key={lvl}
                       type="button"
-                      onClick={() => onChangeDifficulty(lvl)}
-                      className={`rounded-md py-1 text-[11px] font-bold uppercase transition-colors ${
-                        difficulty === lvl
-                          ? 'bg-sky-400 text-slate-950'
+                      onClick={() => onChangePlayMode('1p')}
+                      className={`rounded-md py-1.5 text-xs font-bold transition-colors ${
+                        playMode === '1p'
+                          ? 'bg-slate-100 text-slate-950'
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      {lvl === 'easy' ? 'Dễ' : lvl === 'normal' ? 'Vừa' : 'Khó'}
+                      1P VS CPU
                     </button>
-                  ))}
-                </div>
-              )}
+                    <button
+                      type="button"
+                      onClick={() => onChangePlayMode('2p')}
+                      className={`rounded-md py-1.5 text-xs font-bold transition-colors ${
+                        playMode === '2p'
+                          ? 'bg-slate-100 text-slate-950'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      2P LOCAL
+                    </button>
+                  </div>
 
-              {/* Molecular Visual Mode */}
-              <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
-                {([
-                  { id: 'elemental', label: 'CPK' },
-                  { id: 'rainbow', label: 'Rainbow' },
-                  { id: 'bond', label: 'Bậc LK' },
-                ] as const).map((scheme) => (
+                  {/* CPU Difficulty */}
+                  {playMode === '1p' && (
+                    <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
+                      {(['easy', 'normal', 'hard'] as const).map((lvl) => (
+                        <button
+                          key={lvl}
+                          type="button"
+                          onClick={() => onChangeDifficulty(lvl)}
+                          className={`rounded-md py-1 text-[11px] font-bold uppercase transition-colors ${
+                            difficulty === lvl
+                              ? 'bg-sky-400 text-slate-950'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {lvl === 'easy' ? 'Dễ' : lvl === 'normal' ? 'Vừa' : 'Khó'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              /* Online Solo Room Lobby Panel (Host P1 or Guest P2) */
+              <div className="w-full space-y-2.5">
+                <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs">
+                  <span className="flex items-center gap-1.5 font-mono-tabular font-bold text-emerald-300">
+                    <Wifi className="h-3.5 w-3.5" aria-hidden="true" />
+                    PHÒNG #{onlineRoom?.roomId ?? '...'}
+                  </span>
+                  <span className="font-mono-tabular text-[11px] font-bold text-slate-300">
+                    {onlineRole === 1 ? 'HOST · P1' : 'KHÁCH · P2'}
+                  </span>
+                </div>
+
+                {onlineRole === 1 ? (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="start-online-match"
+                      disabled={!onlineRoom?.p2.connected}
+                      onClick={(e) => {
+                        e.currentTarget.blur();
+                        onStart();
+                      }}
+                      className={`font-display flex w-full items-center justify-center gap-2 rounded-lg px-5 py-2.5 text-base font-bold tracking-wider transition-colors ${
+                        onlineRoom?.p2.connected
+                          ? onlineRoom.p2.ready
+                            ? 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
+                            : 'bg-sky-400 text-slate-950 hover:bg-sky-300'
+                          : 'cursor-not-allowed border border-slate-800 bg-slate-900 text-slate-500'
+                      }`}
+                    >
+                      <Play className="h-4 w-4 fill-current" aria-hidden="true" />
+                      {onlineRoom?.p2.connected ? 'BẮT ĐẦU SOLO ONLINE' : 'CHỜ BẠN BÈ VÀO (P2)...'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onOpenInviteModal}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-2 text-xs font-bold text-sky-200 transition-colors hover:bg-sky-500/25"
+                    >
+                      <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
+                      MÃ QR &amp; LINK MỜI BẠN
+                    </button>
+                  </>
+                ) : (
                   <button
-                    key={scheme.id}
                     type="button"
-                    onClick={() => onChangeColorMode(scheme.id)}
-                    className={`rounded-md py-1 text-[11px] font-bold transition-colors ${
-                      colorMode === scheme.id
-                        ? 'bg-amber-400 text-slate-950'
-                        : 'text-slate-400 hover:text-white'
+                    data-testid="p2-ready-btn"
+                    onClick={onToggleReady}
+                    className={`font-display flex w-full items-center justify-center gap-2 rounded-lg px-5 py-2.5 text-sm font-bold tracking-wider transition-colors ${
+                      onlineRoom?.p2.ready
+                        ? 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
+                        : 'bg-rose-500 text-white hover:bg-rose-400'
                     }`}
                   >
-                    {scheme.label}
+                    <CheckCircle2 className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    {onlineRoom?.p2.ready ? 'ĐÃ SẴN SÀNG · CHỜ P1' : 'SẴN SÀNG CHIẾN ĐẤU (P2)'}
                   </button>
-                ))}
+                )}
+
+                <button
+                  type="button"
+                  onClick={onLeaveOnlineRoom}
+                  className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-slate-400 transition-colors hover:border-rose-500/40 hover:text-rose-200"
+                >
+                  <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                  Rời phòng Online
+                </button>
               </div>
+            )}
+
+            {/* Arena Stage Selector (4 Biochemical Venues) */}
+            <div className="w-full space-y-1.5">
+              <div className="flex items-center justify-between px-0.5 text-[11px] font-semibold text-slate-400">
+                <span>Sàn thi đấu</span>
+                <span className="truncate font-medium text-slate-300">
+                  {onlineRole === 2 ? `${activeStageInfo.label} (Host)` : activeStageInfo.label}
+                </span>
+              </div>
+              <div className="grid w-full grid-cols-2 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
+                {ARENA_STAGES.map((st) => {
+                  const active = arenaStage === st.id;
+                  const disabled = onlineRole === 2;
+                  return (
+                    <button
+                      key={st.id}
+                      type="button"
+                      data-testid={`stage-${st.id}`}
+                      aria-pressed={active}
+                      disabled={disabled}
+                      onClick={() => onChangeStage(st.id)}
+                      className={`rounded-md px-2 py-1.5 text-[11px] font-bold whitespace-nowrap transition-colors ${
+                        active
+                          ? 'text-slate-950'
+                          : disabled
+                          ? 'cursor-not-allowed text-slate-500'
+                          : 'text-slate-400 hover:bg-slate-900 hover:text-white'
+                      }`}
+                      style={active ? { backgroundColor: st.accentHex } : undefined}
+                    >
+                      {st.shortLabel}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Molecular Visual Mode (available in both offline and online) */}
+            <div className="grid w-full grid-cols-3 gap-1 rounded-lg border border-slate-800 bg-slate-950 p-1">
+              {([
+                { id: 'elemental', label: 'CPK' },
+                { id: 'rainbow', label: 'Rainbow' },
+                { id: 'bond', label: 'Bậc LK' },
+              ] as const).map((scheme) => (
+                <button
+                  key={scheme.id}
+                  type="button"
+                  onClick={() => onChangeColorMode(scheme.id)}
+                  className={`rounded-md py-1 text-[11px] font-bold transition-colors ${
+                    colorMode === scheme.id
+                      ? 'bg-amber-400 text-slate-950'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {scheme.label}
+                </button>
+              ))}
             </div>
           </div>
 
           <FighterLoadoutCard
             playerId={2}
             weapon={p2Weapon}
+            roleLabel={
+              onlineRole === 2
+                ? 'P2 · BẠN (TUỲ CHỈNH)'
+                : onlineRole === 1
+                ? 'P2 · BẠN BÈ ONLINE'
+                : undefined
+            }
+            locked={onlineRole === 1}
+            lockedHint={
+              onlineRoom?.p2.connected
+                ? onlineRoom.p2.ready
+                  ? 'Bạn bè đã sẵn sàng chiến đấu!'
+                  : 'Bạn bè đang tuỳ chỉnh vũ khí P2...'
+                : 'Gửi QR / Link cho bạn bè để chọn P2'
+            }
+            highlighted={onlineRole === 2}
             onSelectPreset={(s, n) => onSelectPreset(2, s, n)}
             onOpenCustom={() => onOpenCustomSmiles(2)}
           />
@@ -324,7 +526,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
         {/* Single flat control hint line */}
         <p className="text-center font-mono-tabular text-xs text-slate-400">
-          WASD Di chuyển &amp; Nhảy · F/J Đấm · G/K Đá · H/L Đỡ · R/U Tuyệt chiêu · Enter/Space Bắt đầu
+          WASD Di chuyển · F/J Đấm · G/K Đá · H/L Đỡ · R/U Tuyệt chiêu · Tổ hợp Tiến+J/F Ném phân tử · S+K/G Hất tung · Tiến+K/G Xung kích
         </p>
       </div>
     </div>

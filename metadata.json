@@ -2,5 +2,7 @@
   "name": "Drug Fighter: Molecular Arena",
   "description": "3D molecular fighting arena where NanoKid-inspired chemical warriors duel using real SMILES-parsed 3D drug weapons.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

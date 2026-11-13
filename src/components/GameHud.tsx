@@ -1,7 +1,8 @@
 import React from 'react';
-import { Pause, Volume2, VolumeX } from 'lucide-react';
+import { LogOut, Pause, Volume2, VolumeX } from 'lucide-react';
 import type { ParsedMolecule } from '../chem/smilesEngine';
-import type { MatchState } from '../game/combatEngine';
+import { getArenaStageInfo, type ArenaStageId } from '../game/arenaStages';
+import type { FighterBuffs, MatchState } from '../game/combatEngine';
 
 export interface FloatingCallout {
   id: number;
@@ -15,10 +16,14 @@ interface GameHudProps {
   match: MatchState;
   p1Weapon: ParsedMolecule;
   p2Weapon: ParsedMolecule;
+  arenaStage?: ArenaStageId;
   muted: boolean;
+  onlineRole?: 1 | 2 | null;
+  outroWinner?: 1 | 2 | null;
   callouts: FloatingCallout[];
   onToggleMute: () => void;
   onPause: () => void;
+  onSkipOutro?: () => void;
 }
 
 const RoundSockets: React.FC<{ won: number; accent: string }> = ({ won, accent }) => (
@@ -36,15 +41,74 @@ const RoundSockets: React.FC<{ won: number; accent: string }> = ({ won, accent }
   </div>
 );
 
+const BuffStrip: React.FC<{ buffs?: FighterBuffs; align: 'left' | 'right' }> = ({
+  buffs,
+  align,
+}) => {
+  if (!buffs) return null;
+  const active: { key: string; label: string; secs: number; color: string; icon: 'bolt' | 'fist' | 'shroom' | 'x3' | 'grow' }[] = [];
+  if (buffs.lightning > 0) active.push({ key: 'bolt', label: 'Tốc đánh', secs: buffs.lightning, color: '#facc15', icon: 'bolt' });
+  if (buffs.fist > 0) active.push({ key: 'fist', label: '+Sát thương', secs: buffs.fist, color: '#fb923c', icon: 'fist' });
+  if (buffs.shrink > 0) active.push({ key: 'shroom', label: 'Thu nhỏ', secs: buffs.shrink, color: '#34d399', icon: 'shroom' });
+  if (buffs.tripleThrow > 0) active.push({ key: 'x3', label: 'Ném x3', secs: buffs.tripleThrow, color: '#c084fc', icon: 'x3' });
+  if (buffs.giant > 0) active.push({ key: 'grow', label: 'Phóng to', secs: buffs.giant, color: '#fbbf24', icon: 'grow' });
+  if (active.length === 0) return null;
+
+  return (
+    <div
+      className={`mt-1.5 flex flex-wrap items-center gap-1.5 ${
+        align === 'right' ? 'justify-end' : 'justify-start'
+      }`}
+    >
+      {active.map((b) => (
+        <span
+          key={b.key}
+          className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono-tabular text-[10px] font-bold"
+          style={{
+            backgroundColor: 'rgba(7, 13, 28, 0.9)',
+            borderColor: b.color,
+            color: b.color,
+          }}
+        >
+          <svg viewBox="0 0 16 16" className="h-3 w-3 shrink-0" aria-hidden="true">
+            {b.icon === 'bolt' && (
+              <polygon points="9,1 3,9 8,9 7,15 13,7 8,7" fill="currentColor" />
+            )}
+            {b.icon === 'fist' && (
+              <path d="M4 6h8v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6zm1-3h2v2H5V3zm3 0h2v2H8V3z" fill="currentColor" />
+            )}
+            {b.icon === 'shroom' && (
+              <path d="M2 8a6 6 0 0 1 12 0H2zm4 1h4v5H6V9z" fill="currentColor" />
+            )}
+            {b.icon === 'x3' && (
+              <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+            )}
+            {b.icon === 'grow' && (
+              <path d="M8 1l5 6H9.5v8h-3V7H3l5-6z" fill="currentColor" />
+            )}
+          </svg>
+          <span>{b.label}</span>
+          <span>{Math.ceil(b.secs)}s</span>
+        </span>
+      ))}
+    </div>
+  );
+};
+
 export const GameHud: React.FC<GameHudProps> = ({
   match,
   p1Weapon,
   p2Weapon,
+  arenaStage = 'cell',
   muted,
+  onlineRole = null,
+  outroWinner = null,
   callouts,
   onToggleMute,
   onPause,
+  onSkipOutro,
 }) => {
+  const stageInfo = getArenaStageInfo(arenaStage);
   const { p1, p2 } = match;
   const p1Pct = Math.max(0, Math.min(100, (p1.hp / p1.maxHp) * 100));
   const p1GhostPct = Math.max(0, Math.min(100, (p1.ghostHp / p1.maxHp) * 100));
@@ -81,7 +145,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             <div className="mb-1 flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2">
                 <span className="font-display truncate text-sm font-bold tracking-wide text-sky-300">
-                  P1 · {p1.name.toUpperCase()}
+                  P1{onlineRole === 1 ? ' (BẠN)' : ''} · {p1.name.toUpperCase()}
                 </span>
                 <span className="font-mono-tabular hidden text-xs text-slate-400 md:inline">
                   {p1.formula}
@@ -134,6 +198,7 @@ export const GameHud: React.FC<GameHudProps> = ({
                 {p1.comboCount} HIT COMBO!
               </div>
             )}
+            <BuffStrip buffs={p1.buffs} align="left" />
           </div>
         </div>
 
@@ -147,7 +212,7 @@ export const GameHud: React.FC<GameHudProps> = ({
               {timerDisplay}
             </div>
             <div className="font-display mt-0.5 text-[10px] font-bold tracking-widest text-slate-400">
-              HIỆP {match.roundNumber} / 3
+              HIỆP {match.roundNumber} / 3 · {stageInfo.shortLabel.toUpperCase()}
             </div>
           </div>
           <div className="pointer-events-auto mt-1.5 flex items-center gap-1.5">
@@ -170,10 +235,11 @@ export const GameHud: React.FC<GameHudProps> = ({
                 e.currentTarget.blur();
                 onPause();
               }}
-              aria-label="Tạm dừng [P]"
+              aria-label={onlineRole ? 'Rời trận online' : 'Tạm dừng [P]'}
+              title={onlineRole ? 'Quay về phòng chờ Online' : 'Tạm dừng [P]'}
               className="flex h-7 w-7 items-center justify-center rounded border border-slate-700 bg-slate-900/90 text-slate-300 hover:border-sky-400 hover:text-white"
             >
-              <Pause className="h-3.5 w-3.5" />
+              {onlineRole ? <LogOut className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
             </button>
           </div>
         </div>
@@ -192,7 +258,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             <div className="mb-1 flex flex-row-reverse items-center justify-between gap-2">
               <div className="flex min-w-0 flex-row-reverse items-center gap-2">
                 <span className="font-display truncate text-sm font-bold tracking-wide text-rose-300">
-                  {match.playMode === '1p' ? 'CPU' : 'P2'} · {p2.name.toUpperCase()}
+                  {match.playMode === '1p' ? 'CPU' : `P2${onlineRole === 2 ? ' (BẠN)' : ''}`} · {p2.name.toUpperCase()}
                 </span>
                 <span className="font-mono-tabular hidden text-xs text-slate-400 md:inline">
                   {p2.formula}
@@ -236,7 +302,9 @@ export const GameHud: React.FC<GameHudProps> = ({
                 style={{ color: p2.energy >= 100 ? '#facc15' : '#64748b' }}
               >
                 {p2.energy >= 100
-                  ? match.playMode === '2p'
+                  ? onlineRole === 2
+                    ? 'BURST [R/U/M]'
+                    : match.playMode === '2p' && !onlineRole
                     ? 'BURST [M]'
                     : 'BURST READY'
                   : `${Math.floor(p2.energy)}%`}
@@ -247,6 +315,7 @@ export const GameHud: React.FC<GameHudProps> = ({
                 {p2.comboCount} HIT COMBO!
               </div>
             )}
+            <BuffStrip buffs={p2.buffs} align="right" />
           </div>
         </div>
       </div>
@@ -283,17 +352,58 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       ))}
 
-      {/* Bottom Discrete Keybind Hint Bar */}
-      <div className="flex items-end justify-center">
-        <p
-          className="rounded-md px-3 py-1 font-mono-tabular text-[11px] text-slate-300"
-          style={{ backgroundColor: 'rgba(7, 13, 28, 0.72)' }}
+      {/* Bottom Bar: Stage Victory Outro Banner OR Discrete Keybind Hint */}
+      {outroWinner ? (
+        <div
+          data-testid="stage-outro-banner"
+          className="pointer-events-auto mx-auto flex max-w-2xl items-center justify-between gap-4 rounded-xl border px-5 py-3 shadow-2xl"
+          style={{
+            backgroundColor: 'rgba(7, 13, 28, 0.92)',
+            borderColor: stageInfo.accentHex,
+          }}
         >
-          {match.playMode === '1p'
-            ? 'P1: A/D Di chuyển · W Nhảy · S Ngồi · Shift Lướt · F/J Đấm · G/K Đá · H/L Đỡ · R/U Tuyệt chiêu · Esc Tạm dừng'
-            : 'P1: WASD + Shift Lướt + F Đấm + G Đá + H Đỡ + R Chiêu  |  P2: Mũi tên + , Đấm + . Đá + / Đỡ + M Chiêu'}
-        </p>
-      </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span
+                className="font-mono-tabular text-[11px] font-bold uppercase tracking-wider"
+                style={{ color: stageInfo.accentHex }}
+              >
+                {outroWinner === 1 ? `P1 · ${p1.name}` : `P2 · ${p2.name}`} CHIẾN THẮNG
+              </span>
+              <span className="text-slate-600">·</span>
+              <span className="font-mono-tabular text-[11px] font-semibold text-slate-300">
+                {stageInfo.label}
+              </span>
+            </div>
+            <div className="font-display text-lg font-bold tracking-wide text-white">
+              {stageInfo.outroTitle}
+            </div>
+            <p className="text-xs text-slate-300">{stageInfo.outroSubtitle}</p>
+          </div>
+          {onSkipOutro && (
+            <button
+              type="button"
+              onClick={onSkipOutro}
+              className="shrink-0 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 font-mono-tabular text-xs font-bold text-slate-200 transition-colors hover:border-sky-400 hover:text-white"
+            >
+              Kết quả →
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-end justify-center">
+          <p
+            className="rounded-md px-3 py-1 font-mono-tabular text-[11px] text-slate-300"
+            style={{ backgroundColor: 'rgba(7, 13, 28, 0.72)' }}
+          >
+            {onlineRole
+              ? `ONLINE P${onlineRole} (BẠN): WASD / Mũi tên Di chuyển · F/J Đấm · G/K Đá · H/L Đỡ · R/U Chiêu · Tiến+J Ném phân tử · S+K Hất tung`
+              : match.playMode === '1p'
+              ? 'P1: WASD · F/J Đấm · G/K Đá · H/L Đỡ · R/U Chiêu · Tiến+J Ném phân tử · S+K Hất tung · Tiến+K Xung kích · Esc Dừng'
+              : 'P1: WASD + F/J Đấm + G/K Đá + Tiến+J Ném · S+K Hất | P2: Mũi tên + , Đấm + . Đá + Tiến+, Ném · ↓+. Hất'}
+          </p>
+        </div>
+      )}
     </div>
   );
 };
