@@ -1,6 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, FlaskConical, Check, AlertTriangle } from 'lucide-react';
-import { DRUG_PRESETS, parseSmilesToWeapon, type ParsedMolecule } from '../chem/smilesEngine';
+import { X, FlaskConical, Check, AlertTriangle, Dices } from 'lucide-react';
+import { soundEngine } from '../audio/soundEngine';
+import {
+  DRUG_PRESETS,
+  INTERESTING_COMPOUNDS,
+  parseSmilesToWeapon,
+  type DrugPreset,
+  type ParsedMolecule,
+} from '../chem/smilesEngine';
 
 interface SmilesModalProps {
   open: boolean;
@@ -10,12 +17,8 @@ interface SmilesModalProps {
   onEquip: (playerId: 1 | 2, mol: ParsedMolecule) => void;
 }
 
-const EXTRA_SAMPLES = [
-  { name: 'Adrenaline', smiles: 'CNC[C@H](O)c1ccc(O)c(O)c1' },
-  { name: 'Serotonin', smiles: 'NCCc1c[nH]c2ccc(O)cc12' },
-  { name: 'Melatonin', smiles: 'COc1ccc2[nH]cc(CCNC(C)=O)c2c1' },
-  { name: 'Atropine', smiles: 'CN1C2CCC1CC(C2)OC(=O)C(CO)c3ccccc3' },
-];
+const ALL_SUGGESTIONS: DrugPreset[] = [...DRUG_PRESETS, ...INTERESTING_COMPOUNDS];
+const QUICK_SAMPLES: DrugPreset[] = [...DRUG_PRESETS.slice(0, 6), ...INTERESTING_COMPOUNDS.slice(0, 4)];
 
 export const SmilesModal: React.FC<SmilesModalProps> = ({
   open,
@@ -26,11 +29,13 @@ export const SmilesModal: React.FC<SmilesModalProps> = ({
 }) => {
   const [smilesText, setSmilesText] = useState(currentSmiles);
   const [customName, setCustomName] = useState('');
+  const [activeNote, setActiveNote] = useState<{ name: string; category: string; description: string } | null>(null);
 
   useEffect(() => {
     if (open) {
       setSmilesText(currentSmiles);
       setCustomName('');
+      setActiveNote(null);
     }
   }, [open, currentSmiles]);
 
@@ -41,6 +46,20 @@ export const SmilesModal: React.FC<SmilesModalProps> = ({
   );
 
   if (!open) return null;
+
+  const handlePickPreset = (item: DrugPreset) => {
+    soundEngine.playUiClick();
+    setSmilesText(item.smiles);
+    setCustomName(item.name);
+    setActiveNote({ name: item.name, category: item.category, description: item.description });
+  };
+
+  const handleRandomSuggestion = () => {
+    const candidates = ALL_SUGGESTIONS.filter((item) => item.smiles.trim() !== smilesText.trim());
+    const pool = candidates.length > 0 ? candidates : ALL_SUGGESTIONS;
+    const picked = pool[Math.floor(Math.random() * pool.length)];
+    handlePickPreset(picked);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,21 +111,47 @@ export const SmilesModal: React.FC<SmilesModalProps> = ({
           <div className="grid gap-4 md:grid-cols-[1fr_200px]">
             <div className="space-y-3">
               <div>
-                <label
-                  htmlFor="smiles-input"
-                  className="mb-1.5 block text-xs font-semibold tracking-wider text-slate-300"
-                >
-                  Chuỗi SMILES (Cấu trúc hóa học)
-                </label>
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="smiles-input"
+                    className="block text-xs font-semibold tracking-wider text-slate-300"
+                  >
+                    Chuỗi SMILES (Cấu trúc hóa học)
+                  </label>
+                  <button
+                    type="button"
+                    data-testid="random-smiles-btn"
+                    onClick={handleRandomSuggestion}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-amber-400/50 bg-amber-500/15 px-2.5 py-1 text-xs font-semibold text-amber-300 transition-colors hover:border-amber-300 hover:bg-amber-500/25 hover:text-amber-100 focus-visible:outline-2 focus-visible:outline-amber-400"
+                  >
+                    <Dices className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Gợi ý ngẫu nhiên</span>
+                  </button>
+                </div>
                 <input
                   id="smiles-input"
                   type="text"
                   value={smilesText}
-                  onChange={(e) => setSmilesText(e.target.value)}
+                  onChange={(e) => {
+                    setSmilesText(e.target.value);
+                    setActiveNote(null);
+                  }}
                   placeholder="Ví dụ: CC(=O)Oc1ccccc1C(=O)O"
                   autoFocus
                   className="font-mono-tabular w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-400 focus:outline-none"
                 />
+                {activeNote && (
+                  <p
+                    data-testid="random-smiles-note"
+                    className="mt-1.5 rounded-md border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 text-[11px] leading-snug text-slate-300"
+                  >
+                    <span className="font-semibold text-amber-300">{activeNote.name}</span>
+                    <span className="mx-1.5 text-slate-600">·</span>
+                    <span className="text-sky-300">{activeNote.category}</span>
+                    <span className="mx-1.5 text-slate-600">—</span>
+                    <span>{activeNote.description}</span>
+                  </p>
+                )}
               </div>
 
               <div>
@@ -132,14 +177,11 @@ export const SmilesModal: React.FC<SmilesModalProps> = ({
                   Mẫu phân tử nhanh:
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {[...DRUG_PRESETS.slice(0, 6), ...EXTRA_SAMPLES].map((item) => (
+                  {QUICK_SAMPLES.map((item) => (
                     <button
                       key={item.name}
                       type="button"
-                      onClick={() => {
-                        setSmilesText(item.smiles);
-                        setCustomName(item.name);
-                      }}
+                      onClick={() => handlePickPreset(item)}
                       className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-sky-400 hover:text-white"
                     >
                       {item.name}
@@ -175,6 +217,25 @@ export const SmilesModal: React.FC<SmilesModalProps> = ({
                       <span className="text-amber-400">ATK {preview.stats.atk}</span>
                       <span className="text-sky-400">DEF {preview.stats.def}</span>
                       <span className="text-rose-400">CRIT {preview.stats.crit}%</span>
+                    </div>
+                    <div
+                      data-testid="modal-smiles-skill"
+                      className="mt-2 rounded-md border border-slate-800 bg-slate-900/90 p-2"
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span
+                          className="text-[11px] font-bold"
+                          style={{ color: preview.stats.skill.accentHex }}
+                        >
+                          [F] {preview.stats.skill.name}
+                        </span>
+                        <span className="font-mono-tabular text-[10px] text-slate-400">
+                          {preview.stats.skill.cooldown}s
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[10px] leading-snug text-slate-300">
+                        {preview.stats.skill.description}
+                      </p>
                     </div>
                   </div>
                 </>

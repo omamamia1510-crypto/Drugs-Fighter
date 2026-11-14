@@ -40,7 +40,7 @@ function emptyHeld(): HeldInputState {
 }
 
 function emptyTriggers(): TriggerInputState {
-  return { jump: false, punch: false, kick: false, special: false, dash: false };
+  return { jump: false, punch: false, kick: false, special: false, skill: false, dash: false };
 }
 
 interface PlayerConn {
@@ -130,6 +130,7 @@ function consumeFighterInput(conn: PlayerConn): FighterInput {
     punchJustPressed: conn.triggers.punch,
     kickJustPressed: conn.triggers.kick,
     specialJustPressed: conn.triggers.special,
+    skillJustPressed: conn.triggers.skill,
     dashJustPressed: conn.triggers.dash,
   };
   conn.triggers = emptyTriggers();
@@ -156,7 +157,8 @@ function startRoomMatch(room: Room): boolean {
     { name: p1Parsed.name, formula: p1Parsed.formula, stats: p1Parsed.stats },
     { name: p2Parsed.name, formula: p2Parsed.formula, stats: p2Parsed.stats },
     '2p',
-    'normal'
+    'normal',
+    room.stage
   );
   room.lastStepTime = performance.now();
 

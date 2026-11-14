@@ -7,6 +7,7 @@ import {
   emptyInput,
   FLOOR_Y,
   getFighterBodyScale,
+  getHealthPowerMultiplier,
   stepMatch,
 } from './combatEngine';
 import { ARENA_STAGES, isArenaStageId } from './arenaStages';
@@ -357,5 +358,308 @@ test('power-up buffs apply shrink/giant scale, fist damage, lightning speed, and
   const dealtWithFist = hpBefore - match.p2.hp;
   assert.ok(dealtWithFist >= 24, `Expected fist-boosted punch damage >= 24, got ${dealtWithFist}`);
 });
+
+test('each arena stage spawns its distinct hazard and damages players on contact (mitigated by block)', () => {
+  const stageChecks: Array<{ stage: 'bloodstream' | 'receptor' | 'flask' | 'cell'; expectedType: string }> = [
+    { stage: 'cell', expectedType: 'enzyme_attack' },
+    { stage: 'flask', expectedType: 'stir_bar' },
+    { stage: 'bloodstream', expectedType: 'leukocyte_drop' },
+    { stage: 'receptor', expectedType: 'receptor_competition' },
+  ];
+
+  for (const { stage, expectedType } of stageChecks) {
+    const m = createMatchState(
+      { name: 'Aspirin', formula: 'C9H8O4', stats: sampleStats },
+      { name: 'Paracetamol', formula: 'C8H9NO2', stats: sampleStats },
+      '2p',
+      'normal',
+      stage
+    );
+    m.phase = 'fighting';
+    m.hazardSpawnTimer = 0.05;
+    const evs = [];
+    for (let i = 0; i < 80; i++) {
+      evs.push(...stepMatch(m, emptyInput(), emptyInput(), 1 / 60, () => 0.5));
+    }
+    assert.ok(
+      evs.some((e) => e.type === 'hazard_spawn' && e.hazardType === expectedType),
+      `${stage} should spawn ${expectedType}`
+    );
+    assert.ok(
+      evs.some((e) => e.type === 'hazard_trigger' && e.hazardType === expectedType),
+      `${stage} should transition ${expectedType} from telegraph to active`
+    );
+  }
+
+  // Flask stir_bar hits grounded player at feet, while jumping clears it cleanly
+  const flaskMatch = createMatchState(
+    { name: 'Aspirin', formula: 'C9H8O4', stats: sampleStats },
+    { name: 'Paracetamol', formula: 'C8H9NO2', stats: sampleStats },
+    '2p',
+    'normal',
+    'flask'
+  );
+  flaskMatch.phase = 'fighting';
+  flaskMatch.p1.x = -2;
+  flaskMatch.p2.x = 2;
+  flaskMatch.p2.y = FLOOR_Y + 0.85; // airborne jumping over stir bar
+  flaskMatch.p2.onGround = false;
+  flaskMatch.hazards.push(
+    {
+      id: 99,
+      type: 'stir_bar',
+      stageId: 'flask',
+      phase: 'active',
+      x: -2,
+      y: FLOOR_Y,
+      vx: 0,
+      vy: 0,
+      radius: 1.55,
+      height: 0.48,
+      damage: 14,
+      timer: 1.0,
+      duration: 1.45,
+      hitP1: false,
+      hitP2: false,
+      seed: 0.5,
+    },
+    {
+      id: 100,
+      type: 'stir_bar',
+      stageId: 'flask',
+      phase: 'active',
+      x: 2,
+      y: FLOOR_Y,
+      vx: 0,
+      vy: 0,
+      radius: 1.55,
+      height: 0.48,
+      damage: 14,
+      timer: 1.0,
+      duration: 1.45,
+      hitP1: false,
+      hitP2: false,
+      seed: 0.5,
+    }
+  );
+  const p1FlaskBefore = flaskMatch.p1.hp;
+  const p2FlaskBefore = flaskMatch.p2.hp;
+  stepMatch(flaskMatch, emptyInput(), emptyInput(), 1 / 60, () => 0.5);
+  assert.equal(flaskMatch.p1.hp, p1FlaskBefore - 14);
+  assert.equal(flaskMatch.p2.hp, p2FlaskBefore);
+
+  // Bloodstream leukocyte drops from above & receptor competition hits / blocks properly
+  const compMatch = createMatchState(
+    { name: 'Aspirin', formula: 'C9H8O4', stats: sampleStats },
+    { name: 'Paracetamol', formula: 'C8H9NO2', stats: sampleStats },
+    '2p',
+    'normal',
+    'receptor'
+  );
+  compMatch.phase = 'fighting';
+  compMatch.p1.x = -2;
+  compMatch.p2.x = 2;
+  compMatch.hazards.push(
+    {
+      id: 101,
+      type: 'receptor_competition',
+      stageId: 'receptor',
+      phase: 'active',
+      x: -2,
+      y: FLOOR_Y,
+      vx: 0,
+      vy: 0,
+      radius: 1.28,
+      height: 2.75,
+      damage: 15,
+      timer: 0.5,
+      duration: 0.65,
+      hitP1: false,
+      hitP2: false,
+      seed: 0.5,
+    },
+    {
+      id: 102,
+      type: 'leukocyte_drop',
+      stageId: 'bloodstream',
+      phase: 'active',
+      x: 2,
+      y: FLOOR_Y + 2.0,
+      vx: 0,
+      vy: -9.2,
+      radius: 0.86,
+      height: 1.35,
+      damage: 15,
+      timer: 1.0,
+      duration: 1.15,
+      hitP1: false,
+      hitP2: false,
+      seed: 0.5,
+    }
+  );
+
+  const p1Before = compMatch.p1.hp;
+  const p2Before = compMatch.p2.hp;
+  const p2Block = { ...emptyInput(), blockHeld: true };
+  const contactEvents = stepMatch(compMatch, emptyInput(), p2Block, 1 / 60, () => 0.5);
+
+  assert.equal(compMatch.p1.hp, p1Before - 15);
+  assert.equal(compMatch.p2.hp, p2Before - 4);
+  assert.ok(contactEvents.some((e) => e.type === 'hazard_hit' && e.fighterId === 1 && !e.blocked));
+  assert.ok(contactEvents.some((e) => e.type === 'hazard_hit' && e.fighterId === 2 && e.blocked));
+
+  // Same hazard must not double-hit P1 on consecutive frames
+  stepMatch(compMatch, emptyInput(), emptyInput(), 1 / 60, () => 0.5);
+  assert.equal(compMatch.p1.hp, p1Before - 15);
+});
+
+test('damage output scales down proportionally as attacker health bar decreases', () => {
+  const highStats = { hp: 320, atk: 30, def: 10, spd: 105, crit: 0 };
+  const mFull = createMatchState(
+    { name: 'Aspirin', formula: 'C9H8O4', stats: highStats },
+    { name: 'Paracetamol', formula: 'C8H9NO2', stats: highStats },
+    '2p',
+    'normal'
+  );
+  mFull.phase = 'fighting';
+  mFull.p1.x = 0;
+  mFull.p2.x = 1.6;
+
+  assert.equal(getHealthPowerMultiplier(mFull.p1), 1.0);
+  stepMatch(mFull, { ...emptyInput(), punchJustPressed: true }, emptyInput(), 1 / 60, () => 0.99);
+  for (let i = 0; i < 15; i++) stepMatch(mFull, emptyInput(), emptyInput(), 1 / 60, () => 0.99);
+  const fullHpDamage = 320 - mFull.p2.hp;
+
+  const mLow = createMatchState(
+    { name: 'Aspirin', formula: 'C9H8O4', stats: highStats },
+    { name: 'Paracetamol', formula: 'C8H9NO2', stats: highStats },
+    '2p',
+    'normal'
+  );
+  mLow.phase = 'fighting';
+  mLow.p1.x = 0;
+  mLow.p2.x = 1.6;
+  mLow.p1.hp = 64; // 20% HP -> power mult = 0.4 + 0.6 * 0.2 = 0.52
+
+  assert.ok(Math.abs(getHealthPowerMultiplier(mLow.p1) - 0.52) < 0.001);
+  stepMatch(mLow, { ...emptyInput(), punchJustPressed: true }, emptyInput(), 1 / 60, () => 0.99);
+  for (let i = 0; i < 15; i++) stepMatch(mLow, emptyInput(), emptyInput(), 1 / 60, () => 0.99);
+  const lowHpDamage = 320 - mLow.p2.hp;
+
+  assert.ok(
+    lowHpDamage < fullHpDamage * 0.65 && lowHpDamage > 0,
+    `Expected low HP damage (${lowHpDamage}) to be proportionally lower than full HP damage (${fullHpDamage})`
+  );
+});
+
+test('SMILES [F] signature skills trigger distinct effects, respect cooldowns, and smooth movement accelerates cleanly', () => {
+  // 1. Halogen Corrode projectile ignores block
+  const halogenMatch = createMatchState(
+    {
+      name: 'Fluoxetine',
+      formula: 'C17H18F3NO',
+      stats: {
+        ...sampleStats,
+        hp: 300,
+        skill: {
+          id: 'halogen_corrode',
+          name: 'Ăn Mòn Halogen',
+          shortLabel: 'Xuyên Giáp',
+          description: 'Phóng tia halogen xuyên thủng khiên đỡ.',
+          accentHex: '#4ade80',
+          cooldown: 5.5,
+        },
+      },
+    },
+    { name: 'Paracetamol', formula: 'C8H9NO2', stats: { ...sampleStats, hp: 300 } },
+    '2p',
+    'normal'
+  );
+  halogenMatch.phase = 'fighting';
+  halogenMatch.p1.x = -2.5;
+  halogenMatch.p2.x = 2.5;
+
+  stepMatch(halogenMatch, { ...emptyInput(), skillJustPressed: true }, { ...emptyInput(), blockHeld: true }, 1 / 60);
+  assert.equal(halogenMatch.p1.state, 'skill_windup');
+  assert.ok(halogenMatch.p1.skillCooldown > 5.0, 'Skill cooldown should engage immediately');
+
+  // Cannot re-trigger while on cooldown
+  const hpP2Before = halogenMatch.p2.hp;
+  const skillEvents = advanceMatch(
+    halogenMatch,
+    0.55,
+    emptyInput,
+    () => ({ ...emptyInput(), blockHeld: true })
+  );
+  assert.ok(skillEvents.some((e) => e.type === 'smiles_skill' && e.skillId === 'halogen_corrode'));
+  assert.ok(skillEvents.some((e) => e.type === 'hit' && e.defenderId === 2), 'Halogen skill should pierce block as hit');
+  assert.ok(hpP2Before - halogenMatch.p2.hp >= 18, 'Block-piercing halogen bolt should deal full skill damage');
+
+  // 2. Phenol Shield heals +28 HP and emits smiles_skill healed event
+  const phenolMatch = createMatchState(
+    {
+      name: 'Paracetamol',
+      formula: 'C8H9NO2',
+      stats: {
+        ...sampleStats,
+        hp: 300,
+        skill: {
+          id: 'phenol_shield',
+          name: 'Màng Chắn Phenol',
+          shortLabel: 'Hồi Phục',
+          description: 'Tái tạo +28 HP.',
+          accentHex: '#34d399',
+          cooldown: 6.5,
+        },
+      },
+    },
+    { name: 'Aspirin', formula: 'C9H8O4', stats: { ...sampleStats, hp: 300 } },
+    '2p',
+    'normal'
+  );
+  phenolMatch.phase = 'fighting';
+  phenolMatch.p1.hp = 200;
+  phenolMatch.p1.x = 0;
+  phenolMatch.p2.x = 1.8;
+
+  stepMatch(phenolMatch, { ...emptyInput(), skillJustPressed: true }, emptyInput(), 1 / 60);
+  const phenolEvents = advanceMatch(phenolMatch, 0.25);
+  assert.ok(phenolEvents.some((e) => e.type === 'smiles_skill' && e.skillId === 'phenol_shield' && e.healed === 28));
+  assert.equal(phenolMatch.p1.hp, 228);
+
+  // 3. Alkaloid Surge grants lightning buff & smooth acceleration ramps vx progressively
+  const alkMatch = createMatchState(
+    {
+      name: 'Caffeine',
+      formula: 'C8H10N4O2',
+      stats: {
+        ...sampleStats,
+        hp: 300,
+        skill: {
+          id: 'alkaloid_surge',
+          name: 'Xung Kích Alkaloid',
+          shortLabel: 'Tăng Tốc',
+          description: 'Lao tới và kích hoạt tốc đánh.',
+          accentHex: '#f59e0b',
+          cooldown: 5.5,
+        },
+      },
+    },
+    { name: 'Aspirin', formula: 'C9H8O4', stats: { ...sampleStats, hp: 300 } },
+    '2p',
+    'normal'
+  );
+  alkMatch.phase = 'fighting';
+  stepMatch(alkMatch, { ...emptyInput(), right: true }, emptyInput(), 1 / 60);
+  const firstFrameVx = alkMatch.p1.vx;
+  stepMatch(alkMatch, { ...emptyInput(), right: true }, emptyInput(), 1 / 60);
+  assert.ok(alkMatch.p1.vx > firstFrameVx && firstFrameVx > 0, 'Horizontal velocity should accelerate smoothly');
+
+  advanceMatch(alkMatch, 0.25);
+  stepMatch(alkMatch, { ...emptyInput(), skillJustPressed: true }, emptyInput(), 1 / 60);
+  advanceMatch(alkMatch, 0.2);
+  assert.ok(alkMatch.p1.buffs.lightning >= 3.5, 'Alkaloid surge should grant lightning tempo buff');
+});
+
 
 

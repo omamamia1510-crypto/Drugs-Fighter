@@ -32,6 +32,7 @@ export interface TriggerInputState {
   punch: boolean;
   kick: boolean;
   special: boolean;
+  skill: boolean;
   dash: boolean;
 }
 

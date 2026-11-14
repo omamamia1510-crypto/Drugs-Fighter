@@ -1,14 +1,16 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import type { ParsedMolecule } from '../chem/smilesEngine';
+import type { ParsedMolecule, SmilesSkillId } from '../chem/smilesEngine';
 import { buildArenaStage, type StageBuildResult } from './arenaEnvironments';
 import type { ArenaStageId } from './arenaStages';
 import {
   FLOOR_Y,
   getFighterBodyScale,
+  type ArenaHazard,
   type ColorSchemeMode,
   type CombatEvent,
   type FighterState,
+  type HazardType,
   type MatchState,
   type PowerUpType,
 } from './combatEngine';
@@ -83,6 +85,8 @@ interface DecompPart {
   spinAxis: THREE.Vector3;
   spinSpeed: number;
   delay: number;
+  canShed: boolean;
+  shedThreshold: number;
 }
 
 interface FighterRig {
@@ -116,10 +120,12 @@ interface FighterRig {
   decompParts: DecompPart[];
   decompTimer: number;
   decompSparkTimer: number;
+  decaySparkTimer: number;
   weaponGroup: THREE.Group;
   weaponHaloMat: THREE.MeshBasicMaterial | null;
   currentScale: number;
   buffAuraTimer: number;
+  trailTimer: number;
 }
 
 interface ParticleSlot {
@@ -174,7 +180,10 @@ export class ArenaRenderer {
   private latestMatch: MatchState | null = null;
   private p1Mol: ParsedMolecule | null = null;
   private p2Mol: ParsedMolecule | null = null;
-  private projectileVisuals = new Map<number, { group: THREE.Group; trailTimer: number; ownerId: 1 | 2 }>();
+  private projectileVisuals = new Map<
+    number,
+    { group: THREE.Group; trailTimer: number; ownerId: 1 | 2; skillKind?: SmilesSkillId }
+  >();
   private powerUpVisuals = new Map<
     number,
     {
@@ -183,6 +192,17 @@ export class ArenaRenderer {
       ring: THREE.Mesh;
       groundGlow: THREE.Mesh;
       type: PowerUpType;
+    }
+  >();
+  private hazardVisuals = new Map<
+    number,
+    {
+      group: THREE.Group;
+      telegraphGroup: THREE.Group;
+      activeGroup: THREE.Group;
+      type: HazardType;
+      trailTimer: number;
+      burstTriggered: boolean;
     }
   >();
   private outroState: {
@@ -429,7 +449,12 @@ export class ArenaRenderer {
     return mesh;
   }
 
-  private registerDecompPart(decompParts: DecompPart[], mesh: THREE.Mesh, heightHint: number): void {
+  private registerDecompPart(
+    decompParts: DecompPart[],
+    mesh: THREE.Mesh,
+    heightHint: number,
+    canShed = false
+  ): void {
     const idx = decompParts.length + 1;
     const angle = idx * 2.39996; // Golden-angle distribution
     const horiz = 2.1 + (idx % 5) * 0.55;
@@ -443,6 +468,7 @@ export class ArenaRenderer {
       Math.cos(idx * 2.3),
       Math.sin(idx * 3.1 + 0.5)
     ).normalize();
+    const shedThreshold = 0.14 + ((idx * 37) % 13) * 0.055; // 0.14..0.80 HP loss thresholds
     decompParts.push({
       mesh,
       restPos: mesh.position.clone(),
@@ -452,6 +478,8 @@ export class ArenaRenderer {
       spinAxis,
       spinSpeed: 5.5 + (idx % 4) * 2.0,
       delay: 0.01 + (1 - heightHint) * 0.08 + (idx % 3) * 0.02,
+      canShed,
+      shedThreshold,
     });
   }
 
@@ -490,7 +518,7 @@ export class ArenaRenderer {
       parent.add(m1, m2);
       taggedBonds.push({ mesh: m1, order, heightNorm }, { mesh: m2, order, heightNorm });
       this.registerDecompPart(decompParts, m1, heightNorm);
-      this.registerDecompPart(decompParts, m2, heightNorm);
+      this.registerDecompPart(decompParts, m2, heightNorm, true);
     } else {
       const off = perp.clone().multiplyScalar(0.068);
       const m0 = this.makeBondMesh(p1, p2, 0.032, makeMat());
@@ -503,8 +531,8 @@ export class ArenaRenderer {
         { mesh: m2, order, heightNorm }
       );
       this.registerDecompPart(decompParts, m0, heightNorm);
-      this.registerDecompPart(decompParts, m1, heightNorm);
-      this.registerDecompPart(decompParts, m2, heightNorm);
+      this.registerDecompPart(decompParts, m1, heightNorm, true);
+      this.registerDecompPart(decompParts, m2, heightNorm, true);
     }
   }
 
@@ -772,10 +800,12 @@ export class ArenaRenderer {
       decompParts,
       decompTimer: 0,
       decompSparkTimer: 0,
+      decaySparkTimer: 0,
       weaponGroup,
       weaponHaloMat: null,
       currentScale: 1,
       buffAuraTimer: 0,
+      trailTimer: 0,
     };
   }
 
@@ -963,6 +993,13 @@ export class ArenaRenderer {
         this.spawnBurst(ev.x, ev.y + 0.08, 0, 5, 0x94a3b8, 2.1, 0.55);
       } else if (ev.type === 'special_start') {
         this.spawnBurst(ev.x, ev.y, 0.1, 20, 0xfacc15, 6.2, 1.15);
+      } else if (ev.type === 'smiles_skill') {
+        const colHex = parseInt(ev.color.replace('#', ''), 16) || 0x38bdf8;
+        this.spawnBurst(ev.x, ev.y + 0.15, 0.15, 22, colHex, 6.4, 1.08, 6.0, 0.45, 1.8);
+        this.spawnBurst(ev.x, ev.y + 0.15, 0.18, 10, 0xffffff, 4.8, 0.82, 5.5, 0.34, 1.2);
+        if (ev.healed && ev.healed > 0) {
+          this.spawnBurst(ev.x, ev.y + 0.4, 0.2, 16, 0x34d399, 3.6, 0.95, 7.2, 0.62, -2.6);
+        }
       } else if (ev.type === 'throw') {
         const col = ev.fighterId === 1 ? 0x38bdf8 : 0xf43f5e;
         this.spawnBurst(ev.x, ev.y, 0.15, 14, col, 4.6, 0.9, 9, 0.3, 0.8);
@@ -1024,6 +1061,7 @@ export class ArenaRenderer {
     rig.squashGroup.scale.set(f.squashX, f.squashY, 1);
 
     const isKo = f.state === 'ko';
+    const hpLoss = isKo ? 1 : Math.max(0, Math.min(1, 1 - f.hp / Math.max(1, f.maxHp)));
 
     // Contact shadow grounding & height falloff (fades out as loser decomposes)
     const heightAboveFloor = Math.max(0, f.y - FLOOR_Y);
@@ -1053,6 +1091,10 @@ export class ArenaRenderer {
       } else if (hasTripleBuff) {
         jm.emissive.setHex(0xc084fc);
         jm.emissiveIntensity = 0.32;
+      } else if (!isKo && hpLoss > 0.32) {
+        jm.emissive.setHex(hpLoss > 0.65 ? 0xf43f5e : 0xf97316);
+        jm.emissiveIntensity =
+          (hpLoss - 0.32) * 0.58 + Math.sin(this.elapsed * (6 + hpLoss * 11)) * 0.08;
       } else {
         jm.emissiveIntensity = 0;
       }
@@ -1156,16 +1198,75 @@ export class ArenaRenderer {
         part.mesh.scale.copy(part.restScale).multiplyScalar(sFactor);
         part.mesh.visible = sFactor > 0.04;
       }
-    } else if (rig.decompTimer > 0) {
-      // Cleanly restore intact fighter rig for next round / rematch / title
-      rig.decompTimer = 0;
-      rig.decompSparkTimer = 0;
-      for (let i = 0; i < rig.decompParts.length; i++) {
-        const part = rig.decompParts[i];
-        part.mesh.position.copy(part.restPos);
-        part.mesh.quaternion.copy(part.restQuat);
-        part.mesh.scale.copy(part.restScale);
-        part.mesh.visible = true;
+    } else {
+      if (rig.decompTimer > 0) {
+        rig.decompTimer = 0;
+        rig.decompSparkTimer = 0;
+        rig.decaySparkTimer = 0;
+      }
+
+      if (hpLoss <= 0.04) {
+        for (let i = 0; i < rig.decompParts.length; i++) {
+          const part = rig.decompParts[i];
+          part.mesh.position.copy(part.restPos);
+          part.mesh.quaternion.copy(part.restQuat);
+          part.mesh.scale.copy(part.restScale);
+          part.mesh.visible = true;
+        }
+      } else {
+        // Progressive chemical decomposition proportional to lost HP
+        for (let i = 0; i < rig.decompParts.length; i++) {
+          const part = rig.decompParts[i];
+          if (part.canShed && hpLoss >= part.shedThreshold) {
+            part.mesh.visible = false;
+          } else if (part.canShed && hpLoss >= part.shedThreshold - 0.09) {
+            const preT = (hpLoss - (part.shedThreshold - 0.09)) / 0.09;
+            const snap = preT * preT;
+            part.mesh.position.set(
+              part.restPos.x + part.scatterVel.x * 0.14 * snap + (Math.random() - 0.5) * 0.025,
+              part.restPos.y + part.scatterVel.y * 0.08 * snap + (Math.random() - 0.5) * 0.025,
+              part.restPos.z + part.scatterVel.z * 0.14 * snap
+            );
+            _quat.setFromAxisAngle(part.spinAxis, snap * 0.85);
+            part.mesh.quaternion.copy(part.restQuat).premultiply(_quat);
+            part.mesh.scale.copy(part.restScale).multiplyScalar(Math.max(0.2, 1 - snap * 0.72));
+            part.mesh.visible = true;
+          } else {
+            const jit = hpLoss * 0.02;
+            const gap = hpLoss * 0.032;
+            part.mesh.position.set(
+              part.restPos.x + part.scatterVel.x * gap + (Math.random() - 0.5) * jit,
+              part.restPos.y + (Math.random() - 0.5) * jit,
+              part.restPos.z + part.scatterVel.z * gap + (Math.random() - 0.5) * jit
+            );
+            _quat.setFromAxisAngle(part.spinAxis, Math.sin(t * 14 + i) * hpLoss * 0.06);
+            part.mesh.quaternion.copy(part.restQuat).premultiply(_quat);
+            part.mesh.scale.copy(part.restScale).multiplyScalar(1 - hpLoss * 0.14);
+            part.mesh.visible = true;
+          }
+        }
+
+        if (hpLoss > 0.15 && this.currentState === 'playing') {
+          rig.decaySparkTimer -= dt;
+          if (rig.decaySparkTimer <= 0) {
+            rig.decaySparkTimer = Math.max(0.11, 0.48 - hpLoss * 0.34);
+            const cpkPool = [0x38bdf8, 0x3b82f6, 0xf43f5e, 0xfacc15, 0x4ade80];
+            const sparkCount = hpLoss > 0.55 ? 3 : 2;
+            const col = cpkPool[Math.floor(Math.random() * cpkPool.length)];
+            this.spawnBurst(
+              f.x + (Math.random() - 0.5) * 0.85 * rig.currentScale,
+              f.y + (0.45 + Math.random() * 1.45) * rig.currentScale,
+              (Math.random() - 0.5) * 0.3,
+              sparkCount,
+              col,
+              1.3 + hpLoss * 1.1,
+              0.45 + hpLoss * 0.25,
+              -2.2,
+              0.42,
+              1.5
+            );
+          }
+        }
       }
     }
 
@@ -1181,10 +1282,44 @@ export class ArenaRenderer {
     rig.shieldMat.opacity += (targetShield - rig.shieldMat.opacity) * (1 - Math.exp(-22 * dt));
     rig.shieldMesh.rotation.y += dt * 2.2;
 
+    // Motion-trail sparks during high-speed movement, dash, lunge, or signature skills
+    if (
+      !isKo &&
+      this.currentState === 'playing' &&
+      (f.state === 'dash' || f.state === 'lunge_active' || f.state === 'skill_active')
+    ) {
+      rig.trailTimer -= dt;
+      if (rig.trailTimer <= 0) {
+        rig.trailTimer = 0.042;
+        const trailCol =
+          f.state === 'skill_active'
+            ? parseInt(f.skillColor.replace('#', ''), 16) || 0x38bdf8
+            : f.id === 1
+            ? 0x38bdf8
+            : 0xf43f5e;
+        this.spawnBurst(
+          f.x - f.facing * 0.28,
+          f.y + 1.08 * rig.currentScale,
+          0.12,
+          2,
+          trailCol,
+          1.9,
+          0.75,
+          3.2,
+          0.26,
+          0.4
+        );
+      }
+    }
+
     // Reset default target pose values before state-specific animation
     let pelvisY = 1.48;
     let spineRotZ = -0.06;
+    let spineRotY = 0;
+    let chestRotY = 0;
     let headRotZ = 0.05;
+    let headRotY = 0;
+    let weaponLagZ = 0;
     let lArmZ = 0.55;
     let lForeZ = 0.65;
     let rArmZ = -0.35;
@@ -1204,15 +1339,17 @@ export class ArenaRenderer {
         f.state === 'block' ||
         f.state === 'punch_recovery' ||
         f.state === 'kick_recovery' ||
-        f.state === 'special_recovery');
+        f.state === 'special_recovery' ||
+        f.state === 'skill_recovery');
 
     if (canVictoryPose) {
       if (victoryMode === 'match') {
-        // Grand Match Victory Pose: rhythmic champion hover/bounce & double-arm skyward weapon flourish
         const hop = Math.max(0, Math.sin(t * 3.6)) * 0.22;
         const flourish = Math.sin(t * 6.2);
         pelvisY = 1.52 + hop;
         spineRotZ = 0.1 + Math.sin(t * 3.1) * 0.04;
+        spineRotY = Math.sin(t * 2.5) * 0.22;
+        chestRotY = Math.cos(t * 2.5) * 0.14;
         headRotZ = -0.08;
         rArmZ = 2.18 + flourish * 0.15;
         rForeZ = -0.14;
@@ -1223,10 +1360,10 @@ export class ArenaRenderer {
         rLegZ = -0.34 + hop * 0.4;
         rShinZ = -0.18 - hop * 1.1;
       } else {
-        // Round Victory Pose: proud chest-out stance, weapon thrust aloft + off-hand fist pump
         const pump = Math.sin(t * 7.5);
         pelvisY = 1.5 + Math.abs(pump) * 0.055;
         spineRotZ = 0.09;
+        spineRotY = 0.18;
         headRotZ = -0.06;
         rArmZ = 2.14 + Math.sin(t * 4.8) * 0.1;
         rForeZ = -0.16;
@@ -1238,39 +1375,50 @@ export class ArenaRenderer {
         rShinZ = -0.18;
       }
     } else if (f.state === 'idle') {
-      const bob = Math.sin(t * 4.2 + f.id) * 0.045;
+      const bob = Math.sin(t * 4.4 + f.id) * 0.05;
+      const sway = Math.sin(t * 2.4 + f.id) * 0.09;
       pelvisY += bob;
-      lArmZ = 0.6 + Math.sin(t * 4.2) * 0.08;
-      rArmZ = -0.32 + Math.cos(t * 4.2) * 0.08;
+      spineRotY = sway;
+      chestRotY = sway * 0.6;
+      headRotY = -sway * 0.8;
+      lArmZ = 0.62 + Math.sin(t * 4.4) * 0.1;
+      rArmZ = -0.32 + Math.cos(t * 4.4) * 0.1;
+      weaponLagZ = Math.sin(t * 4.4) * 0.12;
       lLegZ = 0.24;
       lShinZ = -0.28;
       rLegZ = -0.26;
       rShinZ = -0.15;
     } else if (f.state === 'walk') {
-      // Distance-synced stride so feet never skate
       const phase = f.walkDistance * 2.8;
       const s = Math.sin(phase);
       const c = Math.cos(phase);
-      pelvisY += Math.abs(c) * 0.07;
-      spineRotZ = -0.16;
-      lLegZ = s * 0.62;
-      lShinZ = Math.min(0, -0.35 - c * 0.4);
-      rLegZ = -s * 0.62;
-      rShinZ = Math.min(0, -0.35 + c * 0.4);
-      lArmZ = 0.45 - s * 0.45;
-      rArmZ = -0.35 + s * 0.45;
+      pelvisY += Math.abs(c) * 0.085;
+      spineRotZ = -0.18;
+      spineRotY = s * 0.24;
+      chestRotY = s * 0.16;
+      headRotY = -s * 0.22;
+      lLegZ = s * 0.68;
+      lShinZ = Math.min(0, -0.35 - c * 0.44);
+      rLegZ = -s * 0.68;
+      rShinZ = Math.min(0, -0.35 + c * 0.44);
+      lArmZ = 0.45 - s * 0.52;
+      rArmZ = -0.35 + s * 0.52;
+      weaponLagZ = -c * 0.22;
     } else if (f.state === 'jump') {
       pelvisY = 1.56;
       spineRotZ = -0.14;
-      lLegZ = 0.55;
-      lShinZ = -0.85;
-      rLegZ = -0.32;
+      spineRotY = 0.15;
+      lLegZ = 0.58;
+      lShinZ = -0.9;
+      rLegZ = -0.34;
       rShinZ = -0.55;
-      lArmZ = 1.1;
-      rArmZ = -0.9;
+      lArmZ = 1.15;
+      rArmZ = -0.92;
+      weaponLagZ = Math.min(0.45, Math.max(-0.45, -f.vy * 0.04));
     } else if (f.state === 'crouch') {
       pelvisY = 1.06;
       spineRotZ = -0.22;
+      spineRotY = -0.14;
       lLegZ = 0.72;
       lShinZ = -1.25;
       rLegZ = -0.45;
@@ -1278,120 +1426,196 @@ export class ArenaRenderer {
       lArmZ = 0.85;
       rArmZ = -0.65;
     } else if (f.state === 'dash') {
-      spineRotZ = -0.36;
-      lLegZ = -0.45;
-      rLegZ = 0.55;
-      rArmZ = -1.1;
-      lArmZ = 1.0;
+      spineRotZ = -0.4;
+      spineRotY = -0.28;
+      chestRotY = -0.16;
+      lLegZ = -0.5;
+      rLegZ = 0.6;
+      rArmZ = -1.18;
+      lArmZ = 1.05;
+      weaponLagZ = 0.52;
     } else if (f.state === 'block') {
       pelvisY = 1.38;
       spineRotZ = 0.08;
+      spineRotY = -0.26;
       lArmZ = 1.25;
       lForeZ = 1.35;
       rArmZ = 0.95;
       rForeZ = 1.25;
     } else if (f.state === 'punch_windup') {
       spineRotZ = 0.24;
-      rArmZ = -1.35;
-      rForeZ = 0.9;
-      lArmZ = 0.8;
+      spineRotY = -0.42;
+      chestRotY = -0.24;
+      rArmZ = -1.38;
+      rForeZ = 0.92;
+      lArmZ = 0.82;
+      weaponLagZ = 0.45;
     } else if (f.state === 'punch_active') {
-      spineRotZ = -0.26;
-      rArmZ = 1.15;
-      rForeZ = 0.05;
-      lArmZ = -0.6;
-      rLegZ = -0.42;
-      lLegZ = 0.38;
+      spineRotZ = -0.28;
+      spineRotY = 0.52;
+      chestRotY = 0.28;
+      headRotY = -0.35;
+      rArmZ = 1.2;
+      rForeZ = 0.04;
+      lArmZ = -0.65;
+      rLegZ = -0.44;
+      lLegZ = 0.4;
+      weaponLagZ = -0.42;
     } else if (f.state === 'punch_recovery') {
       spineRotZ = -0.1 * (1 - progress);
+      spineRotY = 0.28 * (1 - progress);
       rArmZ = 0.35;
       rForeZ = 0.4;
     } else if (f.state === 'kick_windup') {
       pelvisY = 1.42;
-      spineRotZ = 0.22;
-      rLegZ = -0.45;
-      rShinZ = -1.1;
+      spineRotZ = 0.24;
+      spineRotY = -0.36;
+      rLegZ = -0.48;
+      rShinZ = -1.12;
     } else if (f.state === 'kick_active') {
       pelvisY = 1.54;
-      spineRotZ = 0.36;
-      rLegZ = 1.52;
-      rShinZ = -0.05;
+      spineRotZ = 0.38;
+      spineRotY = 0.46;
+      headRotY = -0.25;
+      rLegZ = 1.56;
+      rShinZ = -0.04;
       lLegZ = -0.18;
-      rArmZ = -0.85;
-      lArmZ = 0.95;
+      rArmZ = -0.88;
+      lArmZ = 0.98;
     } else if (f.state === 'kick_recovery') {
       spineRotZ = 0.14 * (1 - progress);
+      spineRotY = 0.2 * (1 - progress);
       rLegZ = 0.4 * (1 - progress);
     } else if (f.state === 'throw_windup') {
       spineRotZ = 0.28;
-      rArmZ = 2.35;
-      rForeZ = 0.8;
-      lArmZ = 0.95;
+      spineRotY = -0.48;
+      rArmZ = 2.38;
+      rForeZ = 0.82;
+      lArmZ = 0.98;
+      weaponLagZ = 0.55;
     } else if (f.state === 'throw_recovery') {
       spineRotZ = -0.32 * (1 - progress * 0.5);
+      spineRotY = 0.44 * (1 - progress * 0.6);
       rArmZ = 1.05;
       rForeZ = -0.05;
       lArmZ = -0.5;
     } else if (f.state === 'uppercut_windup') {
-      pelvisY = 1.14;
-      spineRotZ = -0.18;
-      rArmZ = -1.4;
-      rForeZ = 0.95;
+      pelvisY = 1.12;
+      spineRotZ = -0.2;
+      spineRotY = -0.35;
+      rArmZ = -1.44;
+      rForeZ = 0.98;
     } else if (f.state === 'uppercut_active') {
-      pelvisY = 1.6;
-      spineRotZ = 0.22;
-      rArmZ = 2.25;
-      rForeZ = 0.15;
-      lArmZ = -0.75;
-      lLegZ = 0.45;
-      lShinZ = -0.85;
+      pelvisY = 1.62;
+      spineRotZ = 0.24;
+      spineRotY = 0.48;
+      chestRotY = 0.24;
+      rArmZ = 2.28;
+      rForeZ = 0.14;
+      lArmZ = -0.78;
+      lLegZ = 0.46;
+      lShinZ = -0.88;
+      weaponLagZ = -0.52;
     } else if (f.state === 'uppercut_recovery') {
       spineRotZ = 0.12 * (1 - progress);
+      spineRotY = 0.24 * (1 - progress);
       rArmZ = 1.4 * (1 - progress);
     } else if (f.state === 'lunge_windup') {
-      pelvisY = 1.26;
-      spineRotZ = -0.28;
-      rArmZ = -1.35;
-      lArmZ = 1.05;
+      pelvisY = 1.24;
+      spineRotZ = -0.3;
+      spineRotY = -0.38;
+      rArmZ = -1.38;
+      lArmZ = 1.08;
+      weaponLagZ = 0.42;
     } else if (f.state === 'lunge_active') {
-      spineRotZ = -0.4;
-      rArmZ = 1.25;
+      spineRotZ = -0.42;
+      spineRotY = 0.44;
+      chestRotY = 0.25;
+      rArmZ = 1.28;
       rForeZ = 0.0;
-      lArmZ = -0.65;
-      lLegZ = 0.52;
-      rLegZ = -0.52;
+      lArmZ = -0.68;
+      lLegZ = 0.54;
+      rLegZ = -0.54;
+      weaponLagZ = -0.48;
     } else if (f.state === 'lunge_recovery') {
       spineRotZ = -0.18 * (1 - progress);
       rArmZ = 0.45 * (1 - progress);
     } else if (f.state === 'special_windup') {
       pelvisY = 1.28;
       spineRotZ = 0.28;
-      rArmZ = -1.65;
-      lArmZ = 1.45;
+      spineRotY = -0.42;
+      rArmZ = -1.68;
+      lArmZ = 1.48;
+      weaponLagZ = 0.55;
     } else if (f.state === 'special_active') {
       spineRotZ = -0.34;
-      rArmZ = 1.35;
+      spineRotY = 0.56;
+      chestRotY = 0.28;
+      rArmZ = 1.38;
       rForeZ = 0.0;
-      lArmZ = 1.15;
+      lArmZ = 1.18;
+      weaponLagZ = -0.48;
+    } else if (f.state === 'skill_windup') {
+      pelvisY = 1.3;
+      spineRotZ = 0.26;
+      spineRotY = -0.52;
+      chestRotY = -0.26;
+      rArmZ = f.skillId === 'phenol_shield' ? 1.85 : -1.55;
+      lArmZ = f.skillId === 'phenol_shield' ? 1.85 : 1.15;
+      rForeZ = 0.85;
+      weaponLagZ = 0.52;
+    } else if (f.state === 'skill_active') {
+      if (f.skillId === 'phenol_shield') {
+        pelvisY = 1.56;
+        spineRotZ = 0.12;
+        spineRotY = 0.18;
+        rArmZ = 2.08;
+        lArmZ = 2.08;
+        rForeZ = 0.32;
+        lForeZ = 0.32;
+      } else {
+        pelvisY = 1.46;
+        spineRotZ = -0.34;
+        spineRotY = 0.62;
+        chestRotY = 0.34;
+        headRotY = -0.38;
+        rArmZ = 1.46;
+        rForeZ = 0.04;
+        lArmZ = -0.55;
+        rLegZ = -0.45;
+        lLegZ = 0.46;
+        weaponLagZ = -0.54;
+      }
+    } else if (f.state === 'skill_recovery') {
+      spineRotZ = -0.14 * (1 - progress);
+      spineRotY = 0.32 * (1 - progress);
+      rArmZ = 0.65 * (1 - progress);
     } else if (f.state === 'hitstun') {
-      spineRotZ = 0.38;
-      headRotZ = 0.32;
+      spineRotZ = 0.4;
+      spineRotY = -0.32;
+      headRotZ = 0.34;
       lArmZ = -0.4;
       rArmZ = -0.9;
     } else if (f.state === 'ko') {
       pelvisY = 1.15;
       rootRotZ = 0.36;
       spineRotZ = 0.22;
+      spineRotY = -0.24;
       rArmZ = -1.1;
       lArmZ = -0.8;
       lLegZ = 0.35;
     }
 
     const k = 1 - Math.exp(-22 * dt);
+    const kTwist = 1 - Math.exp(-18 * dt);
     rig.pelvis.position.y += (pelvisY - rig.pelvis.position.y) * k;
     rig.facingGroup.rotation.z += (rootRotZ - rig.facingGroup.rotation.z) * (1 - Math.exp(-12 * dt));
     rig.spine.rotation.z += (spineRotZ - rig.spine.rotation.z) * k;
+    rig.spine.rotation.y += (spineRotY - rig.spine.rotation.y) * kTwist;
+    rig.chestHub.rotation.y += (chestRotY - rig.chestHub.rotation.y) * kTwist;
     rig.headGroup.rotation.z += (headRotZ - rig.headGroup.rotation.z) * k;
+    rig.headGroup.rotation.y += (headRotY - rig.headGroup.rotation.y) * kTwist;
+    rig.weaponMount.rotation.z += (weaponLagZ - rig.weaponMount.rotation.z) * (1 - Math.exp(-16 * dt));
     rig.leftArm.rotation.z += (lArmZ - rig.leftArm.rotation.z) * k;
     rig.leftForearm.rotation.z += (lForeZ - rig.leftForearm.rotation.z) * k;
     rig.rightArm.rotation.z += (rArmZ - rig.rightArm.rotation.z) * k;
@@ -1460,9 +1684,10 @@ export class ArenaRenderer {
       this.animateRig(this.p1Rig, this.latestMatch.p1, dt, p1Victory);
       this.animateRig(this.p2Rig, this.latestMatch.p2, dt, p2Victory);
 
-      // Sync 3D molecular projectiles & falling functional power-ups
+      // Sync 3D molecular projectiles, falling functional power-ups & stage hazards
       this.syncProjectiles(this.latestMatch, dt);
       this.syncPowerUps(this.latestMatch, dt);
+      this.syncHazards(this.latestMatch, dt);
 
       // Stage-specific 3D victory outro animation
       if (this.outroState.active && this.outroState.update) {
@@ -1585,6 +1810,73 @@ export class ArenaRenderer {
     }
   }
 
+  private createSkillProjectileVisual(skillKind: SmilesSkillId): THREE.Group {
+    const group = new THREE.Group();
+    if (skillKind === 'aromatic_burst') {
+      const ringMat = new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x0ea5e9,
+        emissiveIntensity: 1.15,
+        roughness: 0.18,
+        metalness: 0.55,
+      });
+      const outer = new THREE.Mesh(new THREE.TorusGeometry(0.46, 0.08, 10, 6), ringMat);
+      const inner = new THREE.Mesh(
+        new THREE.TorusGeometry(0.28, 0.045, 8, 24),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      const core = new THREE.Mesh(
+        this.sharedSphereGeo,
+        new THREE.MeshBasicMaterial({ color: 0xe0f2fe })
+      );
+      core.scale.setScalar(0.15);
+      group.add(outer, inner, core);
+    } else if (skillKind === 'sulfur_cage') {
+      const cageMat = new THREE.MeshStandardMaterial({
+        color: 0x2dd4bf,
+        emissive: 0x14b8a6,
+        emissiveIntensity: 1.0,
+        roughness: 0.25,
+        metalness: 0.45,
+        wireframe: true,
+      });
+      const cage = new THREE.Mesh(new THREE.OctahedronGeometry(0.46, 1), cageMat);
+      const core = new THREE.Mesh(
+        this.sharedSphereGeo,
+        new THREE.MeshStandardMaterial({
+          color: 0xfacc15,
+          emissive: 0xf59e0b,
+          emissiveIntensity: 1.1,
+        })
+      );
+      core.scale.setScalar(0.22);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.48, 0.04, 8, 18),
+        new THREE.MeshBasicMaterial({ color: 0x5eead4 })
+      );
+      ring.rotation.x = Math.PI / 2;
+      group.add(cage, core, ring);
+    } else {
+      // halogen_corrode: piercing emerald plasma bolt
+      const lanceMat = new THREE.MeshStandardMaterial({
+        color: 0x4ade80,
+        emissive: 0x22c55e,
+        emissiveIntensity: 1.3,
+        roughness: 0.16,
+        metalness: 0.35,
+      });
+      const tip = new THREE.Mesh(new THREE.OctahedronGeometry(0.32, 0), lanceMat);
+      tip.scale.set(1.6, 0.72, 0.72);
+      const halo = new THREE.Mesh(
+        new THREE.TorusGeometry(0.36, 0.04, 8, 20),
+        new THREE.MeshBasicMaterial({ color: 0xbef264 })
+      );
+      halo.rotation.y = Math.PI / 2;
+      group.add(tip, halo);
+    }
+    return group;
+  }
+
   private syncProjectiles(match: MatchState, dt: number): void {
     const activeIds = new Set<number>();
     for (let i = 0; i < match.projectiles.length; i++) {
@@ -1593,25 +1885,44 @@ export class ArenaRenderer {
 
       let vis = this.projectileVisuals.get(proj.id);
       if (!vis) {
-        const group = new THREE.Group();
-        const mol = proj.ownerId === 1 ? this.p1Mol : this.p2Mol;
-        if (mol) {
-          this.populateMoleculeGroup(group, proj.ownerId, mol, 1.32, 0.85, 0.55);
+        let group: THREE.Group;
+        if (proj.skillKind) {
+          group = this.createSkillProjectileVisual(proj.skillKind);
+        } else {
+          group = new THREE.Group();
+          const mol = proj.ownerId === 1 ? this.p1Mol : this.p2Mol;
+          if (mol) {
+            this.populateMoleculeGroup(group, proj.ownerId, mol, 1.32, 0.85, 0.55);
+          }
         }
         this.scene.add(group);
-        vis = { group, trailTimer: 0, ownerId: proj.ownerId };
+        vis = { group, trailTimer: 0, ownerId: proj.ownerId, skillKind: proj.skillKind };
         this.projectileVisuals.set(proj.id, vis);
       }
 
       vis.group.position.set(proj.x, proj.y, 0.12);
-      vis.group.rotation.z = -proj.spinAngle;
-      vis.group.rotation.y = proj.spinAngle * 0.65;
+      if (proj.skillKind === 'halogen_corrode') {
+        vis.group.rotation.z = proj.vx >= 0 ? 0 : Math.PI;
+        vis.group.rotation.x = proj.spinAngle * 0.9;
+      } else {
+        vis.group.rotation.z = -proj.spinAngle;
+        vis.group.rotation.y = proj.spinAngle * 0.65;
+      }
 
       if (this.currentState !== 'paused') {
         vis.trailTimer -= dt;
         if (vis.trailTimer <= 0) {
           vis.trailTimer = 0.032;
-          const col = proj.ownerId === 1 ? 0x38bdf8 : 0xf43f5e;
+          const col =
+            proj.skillKind === 'halogen_corrode'
+              ? 0x4ade80
+              : proj.skillKind === 'sulfur_cage'
+              ? 0x2dd4bf
+              : proj.skillKind === 'aromatic_burst'
+              ? 0x38bdf8
+              : proj.ownerId === 1
+              ? 0x38bdf8
+              : 0xf43f5e;
           this.spawnBurst(proj.x, proj.y, 0.1, 2, col, 1.8, 0.72, 4.0, 0.24, 0.3);
           this.spawnBurst(proj.x, proj.y, 0.12, 1, 0xfacc15, 1.4, 0.55, 3.0, 0.2, 0.2);
         }
@@ -1813,6 +2124,388 @@ export class ArenaRenderer {
         this.disposeGroupChildren(vis.group);
         this.scene.remove(vis.group);
         this.powerUpVisuals.delete(id);
+      }
+    }
+  }
+
+  private createHazardVisual(hazard: ArenaHazard): {
+    group: THREE.Group;
+    telegraphGroup: THREE.Group;
+    activeGroup: THREE.Group;
+    type: HazardType;
+    trailTimer: number;
+    burstTriggered: boolean;
+  } {
+    const group = new THREE.Group();
+    const telegraphGroup = new THREE.Group();
+    const activeGroup = new THREE.Group();
+    activeGroup.visible = false;
+    group.add(telegraphGroup, activeGroup);
+
+    if (hazard.type === 'stir_bar') {
+      // Bình cầu: Cá từ quay dưới chân
+      const outerRing = new THREE.Mesh(
+        new THREE.RingGeometry(1.18, 1.52, 28),
+        new THREE.MeshBasicMaterial({
+          color: 0x2dd4bf,
+          transparent: true,
+          opacity: 0.85,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      outerRing.rotation.x = -Math.PI / 2;
+      outerRing.position.y = 0.03;
+
+      const vortexDisc = new THREE.Mesh(
+        new THREE.CircleGeometry(1.16, 28),
+        new THREE.MeshBasicMaterial({
+          color: 0xf59e0b,
+          transparent: true,
+          opacity: 0.25,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      vortexDisc.rotation.x = -Math.PI / 2;
+      vortexDisc.position.y = 0.025;
+      telegraphGroup.add(outerRing, vortexDisc);
+
+      // Active: high-RPM white PTFE magnetic stir bar sweeping along the floor
+      const ptfeMat = new THREE.MeshPhysicalMaterial({
+        color: 0xf8fafc,
+        emissive: 0x5eead4,
+        emissiveIntensity: 0.35,
+        roughness: 0.16,
+        metalness: 0.05,
+        clearcoat: 0.9,
+      });
+      const bar = new THREE.Mesh(new THREE.CapsuleGeometry(0.16, 2.35, 8, 16), ptfeMat);
+      bar.rotation.z = Math.PI / 2;
+      bar.position.y = 0.22;
+      activeGroup.add(bar);
+
+      const collar = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.24, 0.24, 0.36, 16),
+        new THREE.MeshStandardMaterial({
+          color: 0x14b8a6,
+          emissive: 0x2dd4bf,
+          emissiveIntensity: 1.0,
+          roughness: 0.2,
+          metalness: 0.5,
+        })
+      );
+      collar.rotation.z = Math.PI / 2;
+      collar.position.y = 0.22;
+      activeGroup.add(collar);
+
+      const spinArc = new THREE.Mesh(
+        new THREE.RingGeometry(0.68, 1.54, 28),
+        new THREE.MeshBasicMaterial({
+          color: 0x5eead4,
+          transparent: true,
+          opacity: 0.55,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      spinArc.rotation.x = -Math.PI / 2;
+      spinArc.position.y = 0.06;
+      activeGroup.add(spinArc);
+    } else if (hazard.type === 'leukocyte_drop') {
+      // Mạch máu: Bạch cầu từ phía trên tấn công
+      const topWarn = new THREE.Mesh(
+        new THREE.RingGeometry(0.55, 0.9, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0xfda4af,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      const dropBeam = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.18, 0.72, 5.65, 14, 1, true),
+        new THREE.MeshBasicMaterial({
+          color: 0xfb7185,
+          transparent: true,
+          opacity: 0.2,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      dropBeam.position.y = -2.82;
+      const floorTarget = new THREE.Mesh(
+        new THREE.RingGeometry(0.58, 0.88, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0xf8fafc,
+          transparent: true,
+          opacity: 0.75,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      floorTarget.rotation.x = -Math.PI / 2;
+      floorTarget.position.y = -5.66;
+      telegraphGroup.add(topWarn, dropBeam, floorTarget);
+
+      // Active: 3D Ruffled Leukocyte (White Blood Cell) with multi-lobed violet nucleus
+      const membraneMat = new THREE.MeshPhysicalMaterial({
+        color: 0xf8fafc,
+        emissive: 0xe2e8f0,
+        emissiveIntensity: 0.45,
+        roughness: 0.24,
+        metalness: 0.05,
+        transparent: true,
+        opacity: 0.84,
+        clearcoat: 0.7,
+      });
+      const body = new THREE.Mesh(new THREE.IcosahedronGeometry(0.58, 1), membraneMat);
+      activeGroup.add(body);
+
+      const nucleusMat = new THREE.MeshStandardMaterial({
+        color: 0x8b5cf6,
+        emissive: 0x6d28d9,
+        emissiveIntensity: 0.95,
+        roughness: 0.25,
+      });
+      for (const nx of [-0.15, 0.16]) {
+        const lobe = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), nucleusMat);
+        lobe.position.set(nx, 0.04, 0);
+        activeGroup.add(lobe);
+      }
+      for (let i = 0; i < 8; i++) {
+        const phi = (i / 8) * Math.PI * 2;
+        const theta = i % 2 === 0 ? 0.55 : -0.55;
+        const pod = new THREE.Mesh(this.sharedSphereGeo, membraneMat);
+        pod.scale.setScalar(0.24);
+        pod.position.set(
+          Math.cos(phi) * 0.56,
+          Math.sin(theta) * 0.48,
+          Math.sin(phi) * 0.45
+        );
+        activeGroup.add(pod);
+      }
+    } else if (hazard.type === 'receptor_competition') {
+      // Đích tác động: Bị cạnh tranh thụ thể
+      const pocketRing = new THREE.Mesh(
+        new THREE.RingGeometry(0.85, 1.28, 6),
+        new THREE.MeshBasicMaterial({
+          color: 0xc084fc,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      pocketRing.rotation.x = -Math.PI / 2;
+      pocketRing.position.y = 0.03;
+
+      const rivalWire = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.56, 0),
+        new THREE.MeshBasicMaterial({
+          color: 0xfacc15,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.85,
+        })
+      );
+      rivalWire.position.y = 1.65;
+      telegraphGroup.add(pocketRing, rivalWire);
+
+      // Active: competing antagonist ligand snapping into the receptor pocket & radiating steric repulsion
+      const rivalMat = new THREE.MeshStandardMaterial({
+        color: 0xd946ef,
+        emissive: 0xa855f7,
+        emissiveIntensity: 0.95,
+        roughness: 0.2,
+        metalness: 0.45,
+      });
+      const coreHex = new THREE.Mesh(new THREE.TorusGeometry(0.52, 0.1, 8, 6), rivalMat);
+      coreHex.position.y = 1.1;
+      activeGroup.add(coreHex);
+
+      const spikeMat = new THREE.MeshStandardMaterial({
+        color: 0xfacc15,
+        emissive: 0xf59e0b,
+        emissiveIntensity: 1.0,
+        roughness: 0.2,
+      });
+      for (let k = 0; k < 6; k++) {
+        const a = (k * Math.PI) / 3;
+        const spike = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0), spikeMat);
+        spike.position.set(Math.cos(a) * 0.85, 1.1 + Math.sin(a) * 0.55, 0);
+        activeGroup.add(spike);
+      }
+
+      const shockRing = new THREE.Mesh(
+        new THREE.TorusGeometry(1.18, 0.075, 8, 28),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      shockRing.rotation.x = Math.PI / 2;
+      shockRing.position.y = 0.25;
+      activeGroup.add(shockRing);
+    } else {
+      // 'enzyme_attack' (Tế bào): Bị enzyme tấn công — catalytic chomping jaws
+      const reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.46, 0.74, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.88,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      telegraphGroup.add(reticle);
+
+      const jawMat = new THREE.MeshPhysicalMaterial({
+        color: 0x38bdf8,
+        emissive: 0x0284c7,
+        emissiveIntensity: 0.75,
+        roughness: 0.18,
+        metalness: 0.25,
+        clearcoat: 0.8,
+        side: THREE.DoubleSide,
+      });
+      // Child 0: upper enzyme jaw; Child 1: lower enzyme jaw
+      const upperJaw = new THREE.Mesh(
+        new THREE.SphereGeometry(0.62, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.44),
+        jawMat
+      );
+      upperJaw.rotation.z = -0.35;
+      const lowerJaw = new THREE.Mesh(
+        new THREE.SphereGeometry(0.62, 16, 10, 0, Math.PI * 2, Math.PI * 0.56, Math.PI * 0.44),
+        jawMat
+      );
+      lowerJaw.rotation.z = 0.35;
+
+      const catalyticCore = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.28, 0),
+        new THREE.MeshStandardMaterial({
+          color: 0xfbbf24,
+          emissive: 0xf59e0b,
+          emissiveIntensity: 1.05,
+          roughness: 0.2,
+        })
+      );
+      const orbitRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.76, 0.035, 8, 24),
+        new THREE.MeshBasicMaterial({ color: 0x7dd3fc })
+      );
+      orbitRing.rotation.x = Math.PI / 3;
+      activeGroup.add(upperJaw, lowerJaw, catalyticCore, orbitRing);
+    }
+
+    return {
+      group,
+      telegraphGroup,
+      activeGroup,
+      type: hazard.type,
+      trailTimer: 0,
+      burstTriggered: false,
+    };
+  }
+
+  private syncHazards(match: MatchState, dt: number): void {
+    const activeIds = new Set<number>();
+    const list = match.hazards ?? [];
+    for (let i = 0; i < list.length; i++) {
+      const h = list[i];
+      activeIds.add(h.id);
+      let vis = this.hazardVisuals.get(h.id);
+      if (!vis) {
+        vis = this.createHazardVisual(h);
+        this.scene.add(vis.group);
+        this.hazardVisuals.set(h.id, vis);
+      }
+
+      vis.group.position.set(h.x, h.y, 0.08);
+      if (h.phase === 'telegraph') {
+        vis.telegraphGroup.visible = true;
+        vis.activeGroup.visible = false;
+        const frac = 1 - Math.max(0, Math.min(1, h.timer / Math.max(0.01, h.duration)));
+        const pulse = 0.8 + Math.abs(Math.sin(this.elapsed * (10 + frac * 18))) * 0.32;
+        if (h.type === 'leukocyte_drop') {
+          // Keep vertical guide beam unscaled along Y while pulsing target rings
+          vis.telegraphGroup.scale.set(pulse, 1, pulse);
+        } else {
+          vis.telegraphGroup.scale.setScalar(pulse);
+        }
+      } else {
+        vis.telegraphGroup.visible = false;
+        vis.activeGroup.visible = true;
+
+        if (!vis.burstTriggered) {
+          vis.burstTriggered = true;
+          const burstCol =
+            h.type === 'stir_bar'
+              ? 0x2dd4bf
+              : h.type === 'leukocyte_drop'
+              ? 0xfda4af
+              : h.type === 'receptor_competition'
+              ? 0xc084fc
+              : 0x38bdf8;
+          this.spawnBurst(h.x, h.y + 0.35, 0.12, 12, burstCol, 4.8, 1.0, 5.0, 0.45, 0.7);
+        }
+
+        if (h.type === 'enzyme_attack') {
+          vis.activeGroup.scale.x = h.vx >= 0 ? 1 : -1;
+          const chomp = Math.abs(Math.sin(this.elapsed * 16)) * 0.48;
+          const upper = vis.activeGroup.children[0];
+          const lower = vis.activeGroup.children[1];
+          if (upper) upper.rotation.z = -chomp;
+          if (lower) lower.rotation.z = chomp;
+          vis.trailTimer -= dt;
+          if (vis.trailTimer <= 0 && this.currentState !== 'paused') {
+            vis.trailTimer = 0.05;
+            this.spawnBurst(h.x, h.y, 0.1, 2, 0x7dd3fc, 2.2, 0.7, 2.4, 0.28, 0.3);
+          }
+        } else if (h.type === 'stir_bar') {
+          // High-speed rotation beneath feet on the flask floor
+          vis.activeGroup.rotation.y += dt * 22.0;
+          vis.trailTimer -= dt;
+          if (vis.trailTimer <= 0 && this.currentState !== 'paused') {
+            vis.trailTimer = 0.045;
+            this.spawnBurst(
+              h.x + (Math.random() - 0.5) * 1.4,
+              h.y + 0.15,
+              0.12,
+              2,
+              0x5eead4,
+              2.6,
+              0.65,
+              1.6,
+              0.3,
+              0.4
+            );
+          }
+        } else if (h.type === 'leukocyte_drop') {
+          vis.activeGroup.rotation.y += dt * 3.8;
+          vis.activeGroup.rotation.z += dt * 2.2;
+          vis.trailTimer -= dt;
+          if (vis.trailTimer <= 0 && this.currentState !== 'paused') {
+            vis.trailTimer = 0.045;
+            this.spawnBurst(h.x, h.y + 0.35, 0.1, 2, 0xfda4af, 2.0, 0.75, 2.2, 0.32, 0.4);
+          }
+        } else {
+          // receptor_competition steric displacement surge
+          const prog = Math.max(0, Math.min(1, h.timer / Math.max(0.01, h.duration)));
+          vis.activeGroup.rotation.y += dt * 9.5;
+          vis.activeGroup.scale.set(
+            0.85 + Math.sin(this.elapsed * 32) * 0.16,
+            0.7 + prog * 0.4,
+            0.85
+          );
+        }
+      }
+    }
+
+    for (const [id, vis] of this.hazardVisuals.entries()) {
+      if (!activeIds.has(id)) {
+        this.disposeGroupChildren(vis.group);
+        this.scene.remove(vis.group);
+        this.hazardVisuals.delete(id);
       }
     }
   }
@@ -2216,6 +2909,11 @@ export class ArenaRenderer {
       this.scene.remove(vis.group);
     }
     this.powerUpVisuals.clear();
+    for (const [, vis] of this.hazardVisuals.entries()) {
+      this.disposeGroupChildren(vis.group);
+      this.scene.remove(vis.group);
+    }
+    this.hazardVisuals.clear();
     this.sharedSphereGeo.dispose();
     this.sharedCylGeo.dispose();
     this.renderer.dispose();

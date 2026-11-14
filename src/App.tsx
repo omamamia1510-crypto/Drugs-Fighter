@@ -18,6 +18,7 @@ import {
   type CpuDifficulty,
   type FighterInput,
   type FighterState,
+  type HazardType,
   type MatchState,
   type PlayMode,
   type PowerUpType,
@@ -48,6 +49,7 @@ function cloneMatchState(src: MatchState): MatchState {
     p2: { ...src.p2, buffs: { ...(src.p2.buffs ?? emptyBuffs()) } },
     projectiles: src.projectiles.map((p) => ({ ...p })),
     powerUps: (src.powerUps ?? []).map((p) => ({ ...p })),
+    hazards: (src.hazards ?? []).map((h) => ({ ...h })),
   };
 }
 
@@ -57,6 +59,13 @@ const POWERUP_CALLOUT_META: Record<PowerUpType, { text: string; color: string }>
   shrink: { text: 'THU NHỎ!', color: '#34d399' },
   triple_throw: { text: 'NÉM x3!', color: '#c084fc' },
   giant: { text: 'PHÓNG TO!', color: '#fbbf24' },
+};
+
+const HAZARD_CALLOUT_META: Record<HazardType, { label: string; color: string }> = {
+  enzyme_attack: { label: 'ENZYME', color: '#38bdf8' },
+  stir_bar: { label: 'CÁ TỪ', color: '#2dd4bf' },
+  leukocyte_drop: { label: 'BẠCH CẦU', color: '#fda4af' },
+  receptor_competition: { label: 'CẠNH TRANH', color: '#c084fc' },
 };
 
 function sameHeld(a: HeldInputState | null, b: HeldInputState): boolean {
@@ -129,7 +138,8 @@ export default function App() {
       { name: p1Weapon.name, formula: p1Weapon.formula, stats: p1Weapon.stats },
       { name: p2Weapon.name, formula: p2Weapon.formula, stats: p2Weapon.stats },
       playMode,
-      difficulty
+      difficulty,
+      arenaStage
     )
   );
   const [hudSnapshot, setHudSnapshot] = useState<MatchState>(() => cloneMatchState(matchRef.current));
@@ -188,7 +198,8 @@ export default function App() {
         { name: w1.name, formula: w1.formula, stats: w1.stats },
         { name: w2.name, formula: w2.formula, stats: w2.stats },
         mode,
-        diff
+        diff,
+        arenaStageRef.current
       );
       syncSnapshotNow();
     },
@@ -243,6 +254,27 @@ export default function App() {
           soundEngine.playSwing(true);
         } else if (ev.type === 'special_start') {
           soundEngine.playSpecial();
+        } else if (ev.type === 'smiles_skill') {
+          soundEngine.playSmilesSkill(ev.skillId);
+          const screen = arena?.projectToScreen(ev.x, ev.y + 0.8);
+          if (screen) {
+            newCallouts.push({
+              id: calloutIdRef.current++,
+              x: screen.x,
+              y: screen.y,
+              text: `${ev.skillName.toUpperCase()}!`,
+              color: ev.color,
+            });
+            if (ev.healed && ev.healed > 0) {
+              newCallouts.push({
+                id: calloutIdRef.current++,
+                x: screen.x,
+                y: screen.y - 26,
+                text: `+${ev.healed} HP`,
+                color: '#34d399',
+              });
+            }
+          }
         } else if (ev.type === 'powerup_pickup') {
           soundEngine.playPowerUpPickup(ev.powerUpType);
           const screen = arena?.projectToScreen(ev.x, ev.y + 0.9);
@@ -254,6 +286,25 @@ export default function App() {
               y: screen.y,
               text: meta.text,
               color: meta.color,
+            });
+          }
+        } else if (ev.type === 'hazard_trigger') {
+          soundEngine.playHazardTrigger(ev.hazardType);
+        } else if (ev.type === 'hazard_hit') {
+          if (ev.blocked) {
+            soundEngine.playBlock();
+          } else {
+            soundEngine.playHazardHit(ev.hazardType);
+          }
+          const screen = arena?.projectToScreen(ev.x, ev.y);
+          if (screen) {
+            const meta = HAZARD_CALLOUT_META[ev.hazardType];
+            newCallouts.push({
+              id: calloutIdRef.current++,
+              x: screen.x,
+              y: screen.y,
+              text: ev.blocked ? `ĐỠ -${ev.damage}` : `${meta.label} -${ev.damage}`,
+              color: ev.blocked ? '#7dd3fc' : meta.color,
             });
           }
         } else if (ev.type === 'round_end') {
@@ -393,6 +444,7 @@ export default function App() {
           Math.abs(t.p2.x - m.p2.x) > 1.8;
 
         m.phase = t.phase;
+        m.stageId = t.stageId ?? arenaStageRef.current;
         m.phaseTimer = t.phaseTimer;
         m.roundNumber = t.roundNumber;
         m.roundTimer = t.roundTimer;
@@ -402,6 +454,7 @@ export default function App() {
         m.cameraTrauma = t.cameraTrauma;
         m.projectiles = t.projectiles.map((p) => ({ ...p }));
         m.powerUps = (t.powerUps ?? []).map((p) => ({ ...p }));
+        m.hazards = (t.hazards ?? []).map((h) => ({ ...h }));
 
         const syncFighterState = (dst: FighterState, src: FighterState) => {
           const prevX = dst.x;
@@ -791,9 +844,10 @@ export default function App() {
           };
           const nextTriggers: TriggerInputState = {
             jump: just.has('w') || (allowP2AltKeys && just.has('arrowup')),
-            punch: just.has('f') || just.has('j') || (allowP2AltKeys && just.has(',')),
+            punch: just.has('j') || (allowP2AltKeys && just.has(',')),
             kick: just.has('g') || just.has('k') || (allowP2AltKeys && just.has('.')),
             special: just.has('r') || just.has('u') || (allowP2AltKeys && just.has('m')),
+            skill: just.has('f') || (allowP2AltKeys && (just.has(';') || just.has('n'))),
             dash:
               just.has('shift') ||
               (allowP2AltKeys && (just.has('control') || just.has(' '))),
@@ -805,6 +859,7 @@ export default function App() {
             nextTriggers.punch ||
             nextTriggers.kick ||
             nextTriggers.special ||
+            nextTriggers.skill ||
             nextTriggers.dash;
 
           if (hasTrigger || !sameHeld(lastSentHeldRef.current, nextHeld)) {
@@ -852,10 +907,11 @@ export default function App() {
         right: held.has('d'),
         jumpJustPressed: just.has('w'),
         crouch: held.has('s'),
-        punchJustPressed: just.has('f') || just.has('j'),
+        punchJustPressed: just.has('j'),
         kickJustPressed: just.has('g') || just.has('k'),
         blockHeld: held.has('h') || held.has('l'),
         specialJustPressed: just.has('r') || just.has('u'),
+        skillJustPressed: just.has('f'),
         dashJustPressed: just.has('shift'),
       };
 
@@ -870,6 +926,7 @@ export default function App() {
               kickJustPressed: just.has('.'),
               blockHeld: held.has('/'),
               specialJustPressed: just.has('m'),
+              skillJustPressed: just.has(';') || just.has('n'),
               dashJustPressed: just.has('control') || just.has(' '),
             }
           : emptyInput();
@@ -952,6 +1009,7 @@ export default function App() {
             if (onlineRoleRef.current === 2) return;
             soundEngine.playUiClick();
             setArenaStage(stage);
+            matchRef.current.stageId = stage;
             if (onlineRoleRef.current === 1) {
               onlineClientRef.current?.send({ type: 'update_stage', stage });
             }

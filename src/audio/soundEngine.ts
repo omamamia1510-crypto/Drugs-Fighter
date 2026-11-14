@@ -1,5 +1,6 @@
+import type { SmilesSkillId } from '../chem/smilesEngine';
 import type { ArenaStageId } from '../game/arenaStages';
-import type { PowerUpType } from '../game/combatEngine';
+import type { HazardType, PowerUpType } from '../game/combatEngine';
 
 export class SoundEngine {
   private ctx: AudioContext | null = null;
@@ -470,6 +471,170 @@ export class SoundEngine {
       osc.start(t);
       osc.stop(t + 0.88);
     });
+  }
+
+  public playHazardTrigger(type: HazardType): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    if (type === 'receptor_competition') {
+      // Electrostatic/steric receptor lock displacement chords
+      [540, 810, 1080].forEach((freq, idx) => {
+        const t = now + idx * 0.04;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(this.randPitch(freq, 0.08), t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 0.55, t + 0.14);
+        gain.gain.setValueAtTime(0.13, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+        osc.connect(gain);
+        gain.connect(this.masterGain!);
+        osc.start(t);
+        osc.stop(t + 0.17);
+      });
+    } else if (type === 'stir_bar') {
+      // High-RPM magnetic stir bar vortex spin under feet
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(160, now);
+      osc.frequency.exponentialRampToValueAtTime(520, now + 0.24);
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.29);
+    } else if (type === 'leukocyte_drop') {
+      // Overhead white blood cell descent dive
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(480, now);
+      osc.frequency.exponentialRampToValueAtTime(115, now + 0.26);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.29);
+    } else {
+      // Enzyme catalytic snap
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(340, now);
+      osc.frequency.exponentialRampToValueAtTime(195, now + 0.2);
+      gain.gain.setValueAtTime(0.16, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.23);
+    }
+  }
+
+  public playHazardHit(type: HazardType): void {
+    this.playHit(true, type === 'receptor_competition');
+  }
+
+  public playSmilesSkill(skillId: SmilesSkillId): void {
+    const ctx = this.ensureCtx();
+    if (!ctx || !this.masterGain) return;
+    const now = ctx.currentTime;
+
+    if (skillId === 'aromatic_burst') {
+      // Shimmering resonant pi-ring chord sweep
+      [523.25, 783.99, 1046.5].forEach((freq, idx) => {
+        const t = now + idx * 0.035;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 1.45, t + 0.19);
+        gain.gain.setValueAtTime(0.16, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+        osc.connect(gain);
+        gain.connect(this.masterGain!);
+        osc.start(t);
+        osc.stop(t + 0.23);
+      });
+    } else if (skillId === 'alkaloid_surge') {
+      // Snappy rising electric caffeine/alkaloid zip
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(240, now);
+      osc.frequency.exponentialRampToValueAtTime(980, now + 0.18);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.22);
+    } else if (skillId === 'phenol_shield') {
+      // Warm protective harmonic chime + low shield thump
+      [392.0, 493.88, 587.33, 783.99].forEach((freq, idx) => {
+        const t = now + idx * 0.045;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, t);
+        gain.gain.setValueAtTime(0.14, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.34);
+        osc.connect(gain);
+        gain.connect(this.masterGain!);
+        osc.start(t);
+        osc.stop(t + 0.36);
+      });
+    } else if (skillId === 'sulfur_cage') {
+      // Metallic disulfide lock snap
+      [293.66, 440.0, 622.25].forEach((freq, idx) => {
+        const t = now + idx * 0.03;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 0.72, t + 0.16);
+        gain.gain.setValueAtTime(0.11, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+        osc.connect(gain);
+        gain.connect(this.masterGain!);
+        osc.start(t);
+        osc.stop(t + 0.19);
+      });
+    } else if (skillId === 'halogen_corrode') {
+      // Sharp corrosive plasma hiss + piercing laser
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(1120, now);
+      osc.frequency.exponentialRampToValueAtTime(290, now + 0.2);
+      gain.gain.setValueAtTime(0.17, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + 0.23);
+    } else {
+      // carbonyl_chain: cascading chain reaction triad
+      [330, 495, 660].forEach((freq, idx) => {
+        const t = now + idx * 0.05;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, t);
+        osc.frequency.exponentialRampToValueAtTime(freq * 1.35, t + 0.14);
+        gain.gain.setValueAtTime(0.17, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.17);
+        osc.connect(gain);
+        gain.connect(this.masterGain!);
+        osc.start(t);
+        osc.stop(t + 0.18);
+      });
+    }
   }
 
   public playUiClick(): void {

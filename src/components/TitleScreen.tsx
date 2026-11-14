@@ -114,6 +114,34 @@ const FighterLoadoutCard: React.FC<{
         </div>
       </div>
 
+      {/* Signature SMILES [F] Skill Badge */}
+      <div
+        data-testid={`p${playerId}-loadout-skill`}
+        className="mt-2 flex items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5"
+        style={{
+          backgroundColor: 'rgba(15, 23, 42, 0.72)',
+          borderColor: `${weapon.stats.skill.accentHex}55`,
+        }}
+      >
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span
+            className="rounded px-1.5 py-0.5 font-mono-tabular text-[10px] font-bold text-slate-950"
+            style={{ backgroundColor: weapon.stats.skill.accentHex }}
+          >
+            F
+          </span>
+          <span className="truncate text-xs font-bold text-slate-100">
+            {weapon.stats.skill.name}
+          </span>
+        </div>
+        <span
+          className="shrink-0 font-mono-tabular text-[10px] font-semibold"
+          style={{ color: weapon.stats.skill.accentHex }}
+        >
+          {weapon.stats.skill.shortLabel}
+        </span>
+      </div>
+
       {/* Preset Drug Selector or Locked Peer Info */}
       {locked ? (
         <div className="mt-2.5 rounded-lg border border-slate-800 bg-slate-950/90 px-3 py-2 text-center text-[11px] font-medium text-slate-400">
@@ -128,9 +156,9 @@ const FighterLoadoutCard: React.FC<{
                 key={preset.id}
                 type="button"
                 onClick={() => onSelectPreset(preset.smiles, preset.name)}
-                className={`rounded-md px-2 py-1 text-[11px] font-semibold whitespace-nowrap transition-colors ${
+                className={`rounded-md px-2 py-1 text-[11px] font-semibold whitespace-nowrap transition-all duration-150 active:scale-95 ${
                   active
-                    ? 'text-slate-950'
+                    ? 'text-slate-950 shadow-sm'
                     : 'border border-slate-800 bg-slate-900/90 text-slate-300 hover:border-slate-600 hover:text-white'
                 }`}
                 style={active ? { backgroundColor: accent } : undefined}
@@ -142,7 +170,7 @@ const FighterLoadoutCard: React.FC<{
           <button
             type="button"
             onClick={onOpenCustom}
-            className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] font-semibold text-slate-200 transition-colors hover:border-sky-400 hover:text-white"
+            className="flex items-center gap-1 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1 text-[11px] font-semibold text-slate-200 transition-all duration-150 hover:border-sky-400 hover:text-white active:scale-95"
           >
             <FlaskConical className="h-3 w-3" style={{ color: accent }} aria-hidden="true" />
             SMILES Tuỳ chỉnh
@@ -304,7 +332,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                     e.currentTarget.blur();
                     onStart();
                   }}
-                  className="font-display flex w-full items-center justify-center gap-2 rounded-lg bg-sky-400 px-6 py-3 text-lg font-bold tracking-wider text-slate-950 shadow-lg transition-colors hover:bg-sky-300 focus-visible:outline-2 focus-visible:outline-white"
+                  className="font-display flex w-full items-center justify-center gap-2 rounded-lg bg-sky-400 px-6 py-3 text-lg font-bold tracking-wider text-slate-950 shadow-lg transition-all duration-150 hover:bg-sky-300 active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-white"
                 >
                   <Play className="h-5 w-5 fill-current" aria-hidden="true" />
                   BẮT ĐẦU ĐẤU
@@ -475,6 +503,12 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
                   );
                 })}
               </div>
+              <div className="px-0.5 text-[10px] font-medium text-slate-400">
+                Hiểm hoạ sàn:{' '}
+                <span className="font-semibold" style={{ color: activeStageInfo.accentHex }}>
+                  {activeStageInfo.hazardLabel}
+                </span>
+              </div>
             </div>
 
             {/* Molecular Visual Mode (available in both offline and online) */}
@@ -526,7 +560,7 @@ export const TitleScreen: React.FC<TitleScreenProps> = ({
 
         {/* Single flat control hint line */}
         <p className="text-center font-mono-tabular text-xs text-slate-400">
-          WASD Di chuyển · F/J Đấm · G/K Đá · H/L Đỡ · R/U Tuyệt chiêu · Tổ hợp Tiến+J/F Ném phân tử · S+K/G Hất tung · Tiến+K/G Xung kích
+          WASD Di chuyển · F Kỹ năng SMILES · J Đấm · G/K Đá · H/L Đỡ · R/U Burst · Tiến+J Ném phân tử · S+K Hất tung · Tiến+K Xung kích
         </p>
       </div>
     </div>

@@ -2,7 +2,7 @@ import React from 'react';
 import { LogOut, Pause, Volume2, VolumeX } from 'lucide-react';
 import type { ParsedMolecule } from '../chem/smilesEngine';
 import { getArenaStageInfo, type ArenaStageId } from '../game/arenaStages';
-import type { FighterBuffs, MatchState } from '../game/combatEngine';
+import { getHealthPowerMultiplier, type FighterBuffs, type MatchState } from '../game/combatEngine';
 
 export interface FloatingCallout {
   id: number;
@@ -114,6 +114,8 @@ export const GameHud: React.FC<GameHudProps> = ({
   const p1GhostPct = Math.max(0, Math.min(100, (p1.ghostHp / p1.maxHp) * 100));
   const p2Pct = Math.max(0, Math.min(100, (p2.hp / p2.maxHp) * 100));
   const p2GhostPct = Math.max(0, Math.min(100, (p2.ghostHp / p2.maxHp) * 100));
+  const p1PowerPct = Math.round(getHealthPowerMultiplier(p1) * 100);
+  const p2PowerPct = Math.round(getHealthPowerMultiplier(p2) * 100);
 
   const timerDisplay = String(Math.ceil(match.roundTimer)).padStart(2, '0');
 
@@ -134,10 +136,16 @@ export const GameHud: React.FC<GameHudProps> = ({
         {/* P1 Bar Cluster */}
         <div className="flex w-[38%] max-w-[460px] items-start gap-3">
           <div
-            className="hidden h-16 w-16 shrink-0 rounded-lg border-2 p-1 sm:block"
+            className={`hidden h-16 w-16 shrink-0 rounded-lg border-2 p-1 transition-all duration-200 sm:block ${
+              p1Pct > 0 && p1Pct < 28 ? 'animate-pulse' : ''
+            }`}
             style={{
               backgroundColor: 'rgba(7, 16, 34, 0.92)',
-              borderColor: '#38bdf8',
+              borderColor: p1Pct > 0 && p1Pct < 28 ? '#f59e0b' : '#38bdf8',
+              boxShadow:
+                p1Pct > 0 && p1Pct < 28
+                  ? '0 0 16px rgba(245, 158, 11, 0.45)'
+                  : '0 0 12px rgba(56, 189, 248, 0.18)',
             }}
             dangerouslySetInnerHTML={{ __html: p1Weapon.svg2d }}
           />
@@ -157,11 +165,11 @@ export const GameHud: React.FC<GameHudProps> = ({
             {/* HP Track with Delayed Ghost Bar */}
             <div className="relative h-4 w-full overflow-hidden rounded border border-slate-700 bg-slate-950">
               <div
-                className="absolute inset-y-0 left-0 bg-white/65 transition-none"
+                className="absolute inset-y-0 left-0 bg-white/65 transition-[width] duration-150 ease-out"
                 style={{ width: `${p1GhostPct}%` }}
               />
               <div
-                className="absolute inset-y-0 left-0 transition-none"
+                className="absolute inset-y-0 left-0 transition-[width,background-color] duration-100 ease-out"
                 style={{
                   width: `${p1Pct}%`,
                   backgroundColor: p1Pct < 25 ? '#f59e0b' : '#38bdf8',
@@ -175,11 +183,11 @@ export const GameHud: React.FC<GameHudProps> = ({
               </span>
             </div>
 
-            {/* Special Energy Bar + Combo */}
+            {/* Special Energy Bar + Signature SMILES [F] Skill */}
             <div className="mt-1.5 flex items-center gap-2">
               <div className="relative h-2 flex-1 overflow-hidden rounded-sm border border-slate-800 bg-slate-950">
                 <div
-                  className="h-full transition-none"
+                  className="h-full transition-[width,background-color] duration-100 ease-out"
                   style={{
                     width: `${p1.energy}%`,
                     backgroundColor: p1.energy >= 100 ? '#facc15' : '#0284c7',
@@ -193,8 +201,68 @@ export const GameHud: React.FC<GameHudProps> = ({
                 {p1.energy >= 100 ? 'BURST READY [R/U]' : `${Math.floor(p1.energy)}%`}
               </span>
             </div>
+
+            {(() => {
+              const p1SkillReady = (p1.skillCooldown ?? 0) <= 0.01;
+              const p1SkillPct = p1SkillReady
+                ? 100
+                : Math.max(
+                    0,
+                    Math.min(100, (1 - p1.skillCooldown / Math.max(1, p1.skillMaxCooldown)) * 100)
+                  );
+              return (
+                <div
+                  data-testid="p1-skill-bar"
+                  className={`mt-1.5 flex items-center gap-2 rounded border px-2 py-0.5 transition-all duration-150 ${
+                    p1SkillReady ? 'animate-skill-ready' : ''
+                  }`}
+                  style={{
+                    backgroundColor: 'rgba(7, 13, 28, 0.88)',
+                    borderColor: p1SkillReady ? p1.skillColor : 'rgba(51, 65, 85, 0.75)',
+                  }}
+                >
+                  <span
+                    className="rounded px-1 font-mono-tabular text-[10px] font-bold text-slate-950"
+                    style={{ backgroundColor: p1SkillReady ? p1.skillColor : '#475569' }}
+                  >
+                    F
+                  </span>
+                  <span className="truncate text-[10px] font-bold text-slate-100">
+                    {p1.skillName}
+                  </span>
+                  <div className="relative h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-slate-900">
+                    <div
+                      className="h-full transition-[width] duration-100 ease-out"
+                      style={{
+                        width: `${p1SkillPct}%`,
+                        backgroundColor: p1SkillReady ? p1.skillColor : '#64748b',
+                      }}
+                    />
+                  </div>
+                  <span
+                    className="font-mono-tabular shrink-0 text-[10px] font-bold"
+                    style={{ color: p1SkillReady ? p1.skillColor : '#94a3b8' }}
+                  >
+                    {p1SkillReady ? 'SẴN SÀNG' : `${p1.skillCooldown.toFixed(1)}s`}
+                  </span>
+                </div>
+              );
+            })()}
+
+            {p1.hp > 0 && p1PowerPct < 96 && (
+              <div
+                data-testid="p1-power-decay"
+                className="font-mono-tabular mt-1 text-[10px] font-bold"
+                style={{ color: p1PowerPct < 65 ? '#fb7185' : '#fbbf24' }}
+              >
+                Phân huỷ {Math.round(100 - p1Pct)}% · Lực đánh {p1PowerPct}%
+              </div>
+            )}
             {p1.comboCount >= 2 && (
-              <div className="font-display mt-1 text-sm font-bold tracking-wider text-amber-300">
+              <div
+                key={`p1-combo-${p1.comboCount}`}
+                className="animate-combo-pop font-display mt-1 text-sm font-bold tracking-wider text-amber-300"
+              >
                 {p1.comboCount} HIT COMBO!
               </div>
             )}
@@ -247,10 +315,16 @@ export const GameHud: React.FC<GameHudProps> = ({
         {/* P2 Bar Cluster */}
         <div className="flex w-[38%] max-w-[460px] flex-row-reverse items-start gap-3">
           <div
-            className="hidden h-16 w-16 shrink-0 rounded-lg border-2 p-1 sm:block"
+            className={`hidden h-16 w-16 shrink-0 rounded-lg border-2 p-1 transition-all duration-200 sm:block ${
+              p2Pct > 0 && p2Pct < 28 ? 'animate-pulse' : ''
+            }`}
             style={{
               backgroundColor: 'rgba(7, 16, 34, 0.92)',
-              borderColor: '#f43f5e',
+              borderColor: p2Pct > 0 && p2Pct < 28 ? '#f59e0b' : '#f43f5e',
+              boxShadow:
+                p2Pct > 0 && p2Pct < 28
+                  ? '0 0 16px rgba(245, 158, 11, 0.45)'
+                  : '0 0 12px rgba(244, 63, 94, 0.18)',
             }}
             dangerouslySetInnerHTML={{ __html: p2Weapon.svg2d }}
           />
@@ -269,11 +343,11 @@ export const GameHud: React.FC<GameHudProps> = ({
 
             <div className="relative h-4 w-full overflow-hidden rounded border border-slate-700 bg-slate-950">
               <div
-                className="absolute inset-y-0 right-0 bg-white/65 transition-none"
+                className="absolute inset-y-0 right-0 bg-white/65 transition-[width] duration-150 ease-out"
                 style={{ width: `${p2GhostPct}%` }}
               />
               <div
-                className="absolute inset-y-0 right-0 transition-none"
+                className="absolute inset-y-0 right-0 transition-[width,background-color] duration-100 ease-out"
                 style={{
                   width: `${p2Pct}%`,
                   backgroundColor: p2Pct < 25 ? '#f59e0b' : '#f43f5e',
@@ -290,7 +364,7 @@ export const GameHud: React.FC<GameHudProps> = ({
             <div className="mt-1.5 flex flex-row-reverse items-center gap-2">
               <div className="relative h-2 flex-1 overflow-hidden rounded-sm border border-slate-800 bg-slate-950">
                 <div
-                  className="ml-auto h-full transition-none"
+                  className="ml-auto h-full transition-[width,background-color] duration-100 ease-out"
                   style={{
                     width: `${p2.energy}%`,
                     backgroundColor: p2.energy >= 100 ? '#facc15' : '#e11d48',
@@ -310,8 +384,68 @@ export const GameHud: React.FC<GameHudProps> = ({
                   : `${Math.floor(p2.energy)}%`}
               </span>
             </div>
+
+            {(() => {
+              const p2SkillReady = (p2.skillCooldown ?? 0) <= 0.01;
+              const p2SkillPct = p2SkillReady
+                ? 100
+                : Math.max(
+                    0,
+                    Math.min(100, (1 - p2.skillCooldown / Math.max(1, p2.skillMaxCooldown)) * 100)
+                  );
+              const p2SkillKey =
+                onlineRole === 2 ? 'F/;' : match.playMode === '2p' ? ';' : 'CPU';
+              return (
+                <div
+                  data-testid="p2-skill-bar"
+                  className="mt-1.5 flex flex-row-reverse items-center gap-2 rounded border px-2 py-0.5 transition-all duration-150"
+                  style={{
+                    backgroundColor: 'rgba(7, 13, 28, 0.88)',
+                    borderColor: p2SkillReady ? p2.skillColor : 'rgba(51, 65, 85, 0.75)',
+                  }}
+                >
+                  <span
+                    className="rounded px-1 font-mono-tabular text-[10px] font-bold text-slate-950"
+                    style={{ backgroundColor: p2SkillReady ? p2.skillColor : '#475569' }}
+                  >
+                    {p2SkillKey}
+                  </span>
+                  <span className="truncate text-[10px] font-bold text-slate-100">
+                    {p2.skillName}
+                  </span>
+                  <div className="relative h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-slate-900">
+                    <div
+                      className="ml-auto h-full transition-[width] duration-100 ease-out"
+                      style={{
+                        width: `${p2SkillPct}%`,
+                        backgroundColor: p2SkillReady ? p2.skillColor : '#64748b',
+                      }}
+                    />
+                  </div>
+                  <span
+                    className="font-mono-tabular shrink-0 text-[10px] font-bold"
+                    style={{ color: p2SkillReady ? p2.skillColor : '#94a3b8' }}
+                  >
+                    {p2SkillReady ? 'SẴN SÀNG' : `${p2.skillCooldown.toFixed(1)}s`}
+                  </span>
+                </div>
+              );
+            })()}
+
+            {p2.hp > 0 && p2PowerPct < 96 && (
+              <div
+                data-testid="p2-power-decay"
+                className="font-mono-tabular mt-1 text-right text-[10px] font-bold"
+                style={{ color: p2PowerPct < 65 ? '#fb7185' : '#fbbf24' }}
+              >
+                Phân huỷ {Math.round(100 - p2Pct)}% · Lực đánh {p2PowerPct}%
+              </div>
+            )}
             {p2.comboCount >= 2 && (
-              <div className="font-display mt-1 text-right text-sm font-bold tracking-wider text-amber-300">
+              <div
+                key={`p2-combo-${p2.comboCount}`}
+                className="animate-combo-pop font-display mt-1 text-right text-sm font-bold tracking-wider text-amber-300"
+              >
                 {p2.comboCount} HIT COMBO!
               </div>
             )}
@@ -397,10 +531,10 @@ export const GameHud: React.FC<GameHudProps> = ({
             style={{ backgroundColor: 'rgba(7, 13, 28, 0.72)' }}
           >
             {onlineRole
-              ? `ONLINE P${onlineRole} (BẠN): WASD / Mũi tên Di chuyển · F/J Đấm · G/K Đá · H/L Đỡ · R/U Chiêu · Tiến+J Ném phân tử · S+K Hất tung`
+              ? `ONLINE P${onlineRole} (BẠN): WASD / Mũi tên Di chuyển · F Kỹ năng SMILES · J Đấm · G/K Đá · H/L Đỡ · R/U Burst · Tiến+J Ném`
               : match.playMode === '1p'
-              ? 'P1: WASD · F/J Đấm · G/K Đá · H/L Đỡ · R/U Chiêu · Tiến+J Ném phân tử · S+K Hất tung · Tiến+K Xung kích · Esc Dừng'
-              : 'P1: WASD + F/J Đấm + G/K Đá + Tiến+J Ném · S+K Hất | P2: Mũi tên + , Đấm + . Đá + Tiến+, Ném · ↓+. Hất'}
+              ? 'P1: WASD Di chuyển · F Kỹ năng SMILES · J Đấm · G/K Đá · H/L Đỡ · R/U Burst · Tiến+J Ném phân tử · S+K Hất tung · Esc Dừng'
+              : 'P1: WASD + F Skill SMILES + J Đấm + K Đá + Tiến+J Ném · S+K Hất | P2: Mũi tên + ; Skill + , Đấm + . Đá + Tiến+, Ném'}
           </p>
         </div>
       )}

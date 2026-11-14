@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DRUG_PRESETS, parseSmilesToWeapon } from './smilesEngine';
+import { DRUG_PRESETS, INTERESTING_COMPOUNDS, parseSmilesToWeapon } from './smilesEngine';
 
-test('all drug presets parse cleanly with valid 2D SVG and 3D conformer coords', () => {
-  for (const preset of DRUG_PRESETS) {
+test('all drug presets and interesting compounds parse cleanly with valid 2D SVG and 3D conformer coords', () => {
+  for (const preset of [...DRUG_PRESETS, ...INTERESTING_COMPOUNDS]) {
     const res = parseSmilesToWeapon(preset.smiles, preset.name);
     assert.equal(res.success, true, `Preset ${preset.name} failed to parse`);
     if (res.success) {
       assert.ok(res.atoms.length >= 5, `${preset.name} should have >= 5 heavy atoms`);
       assert.ok(res.bonds.length >= 4, `${preset.name} should have >= 4 bonds`);
       assert.ok(res.svg2d.startsWith('<svg'), `${preset.name} should emit SVG`);
-      assert.ok(res.stats.hp >= 120 && res.stats.hp <= 220);
+      assert.ok(res.stats.hp >= 260 && res.stats.hp <= 420);
       assert.ok(res.stats.atk >= 14);
       for (const atom of res.atoms) {
         assert.ok(Number.isFinite(atom.x) && Number.isFinite(atom.y) && Number.isFinite(atom.z));
@@ -61,4 +61,29 @@ test('rejects invalid or empty SMILES gracefully', () => {
   assert.equal(parseSmilesToWeapon('CC(=O').success, false);
   assert.equal(parseSmilesToWeapon('c1ccccc').success, false);
   assert.equal(parseSmilesToWeapon('C$C').success, false);
+});
+
+test('assigns distinct signature SMILES skills across chemical structure motifs', () => {
+  const cases: Array<{ smiles: string; name: string; expectedSkill: string }> = [
+    { smiles: 'CC(=O)Oc1ccccc1C(=O)O', name: 'Aspirin', expectedSkill: 'aromatic_burst' },
+    { smiles: 'CN1C=NC2=C1C(=O)N(C(=O)N2C)C', name: 'Caffeine', expectedSkill: 'alkaloid_surge' },
+    { smiles: 'CC(=O)Nc1ccc(O)cc1', name: 'Paracetamol', expectedSkill: 'phenol_shield' },
+    { smiles: 'CC1(C(N2C(S1)C(C2=O)NC(=O)CC3=CC=CC=C3)C(=O)O)C', name: 'Penicillin G', expectedSkill: 'sulfur_cage' },
+    { smiles: 'Fc1ccccc1', name: 'Fluorobenzene', expectedSkill: 'halogen_corrode' },
+    { smiles: 'CC(=O)O', name: 'Acetic Acid', expectedSkill: 'carbonyl_chain' },
+  ];
+
+  for (const tc of cases) {
+    const parsed = parseSmilesToWeapon(tc.smiles, tc.name);
+    assert.equal(parsed.success, true, `${tc.name} should parse`);
+    if (parsed.success) {
+      assert.equal(
+        parsed.stats.skill.id,
+        tc.expectedSkill,
+        `Expected ${tc.name} (${tc.smiles}) to classify as ${tc.expectedSkill}, got ${parsed.stats.skill.id}`
+      );
+      assert.ok(parsed.stats.skill.name.length > 0);
+      assert.ok(parsed.stats.skill.cooldown >= 4.5);
+    }
+  }
 });

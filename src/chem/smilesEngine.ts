@@ -20,6 +20,23 @@ export interface MolBond {
 
 export type WeaponArchetype = 'Catalyst Blade' | 'Aromatic Chakram' | 'Alkaloid Hammer' | 'Bio-Staff';
 
+export type SmilesSkillId =
+  | 'aromatic_burst'
+  | 'alkaloid_surge'
+  | 'phenol_shield'
+  | 'sulfur_cage'
+  | 'halogen_corrode'
+  | 'carbonyl_chain';
+
+export interface SmilesSkillInfo {
+  id: SmilesSkillId;
+  name: string;
+  shortLabel: string;
+  description: string;
+  accentHex: string;
+  cooldown: number;
+}
+
 export interface MoleculeStats {
   mw: number;
   logp: number;
@@ -33,6 +50,7 @@ export interface MoleculeStats {
   spd: number;
   crit: number;
   archetype: WeaponArchetype;
+  skill: SmilesSkillInfo;
 }
 
 export interface ParsedMolecule {
@@ -117,6 +135,121 @@ export const DRUG_PRESETS: DrugPreset[] = [
     smiles: 'CN1CCCC1c2cccnc2',
     category: 'Alkaloid',
     description: 'Fast twin-ring catalyst with sharp crit rate.',
+  },
+];
+
+export const INTERESTING_COMPOUNDS: DrugPreset[] = [
+  {
+    id: 'adrenaline',
+    name: 'Adrenaline',
+    smiles: 'CNC[C@H](O)c1ccc(O)c(O)c1',
+    category: 'Hormone',
+    description: 'Hormone kích hoạt phản xạ chiến đấu cực nhanh.',
+  },
+  {
+    id: 'serotonin',
+    name: 'Serotonin',
+    smiles: 'NCCc1c[nH]c2ccc(O)cc12',
+    category: 'Dẫn truyền TK',
+    description: 'Vòng indole điều hoà tâm trạng và nhịp đánh.',
+  },
+  {
+    id: 'melatonin',
+    name: 'Melatonin',
+    smiles: 'COc1ccc2[nH]cc(CCNC(C)=O)c2c1',
+    category: 'Hormone',
+    description: 'Phân tử điều hoà nhịp sinh học với nhân indole.',
+  },
+  {
+    id: 'atropine',
+    name: 'Atropine',
+    smiles: 'CN1C2CCC1CC(C2)OC(=O)C(CO)c3ccccc3',
+    category: 'Alkaloid',
+    description: 'Khung tropane hai vòng độc đáo từ cây cà độc dược.',
+  },
+  {
+    id: 'capsaicin',
+    name: 'Capsaicin',
+    smiles: 'COc1cc(CNC(=O)CCCCC=CC(C)C)ccc1O',
+    category: 'Hoạt chất thực vật',
+    description: 'Hoạt chất tạo vị cay nồng đặc trưng của ớt.',
+  },
+  {
+    id: 'vanillin',
+    name: 'Vanillin',
+    smiles: 'COc1cc(C=O)ccc1O',
+    category: 'Hương liệu',
+    description: 'Tinh chất tạo hương thơm vani tự nhiên.',
+  },
+  {
+    id: 'curcumin',
+    name: 'Curcumin',
+    smiles: 'COc1cc(C=CC(=O)CC(=O)C=Cc2ccc(O)c(OC)c2)ccc1O',
+    category: 'Polyphenol',
+    description: 'Chuỗi đối xứng nghệ vàng với hai vòng thơm lớn.',
+  },
+  {
+    id: 'resveratrol',
+    name: 'Resveratrol',
+    smiles: 'Oc1ccc(C=Cc2cc(O)cc(O)c2)cc1',
+    category: 'Stilbenoid',
+    description: 'Chất chống oxy hoá nổi tiếng từ vỏ nho đỏ.',
+  },
+  {
+    id: 'vitamin_c',
+    name: 'Vitamin C',
+    smiles: 'OC[C@H](O)[C@H]1OC(=O)C(O)=C1O',
+    category: 'Vitamin',
+    description: 'Acid ascorbic giàu nhóm -OH tăng cường miễn dịch.',
+  },
+  {
+    id: 'theobromine',
+    name: 'Theobromine',
+    smiles: 'Cn1cnc2c1c(=O)[nH]c(=O)n2C',
+    category: 'Alkaloid',
+    description: 'Hoạt chất purine đặc trưng trong hạt cacao và sô-cô-la.',
+  },
+  {
+    id: 'lidocaine',
+    name: 'Lidocaine',
+    smiles: 'CCN(CC)CC(=O)Nc1c(C)cccc1C',
+    category: 'Gây tê',
+    description: 'Cấu trúc amide linh hoạt cân bằng công và thủ.',
+  },
+  {
+    id: 'oseltamivir',
+    name: 'Oseltamivir',
+    smiles: 'CCC(CC)O[C@@H]1C=C(C(=O)OCC)C[C@H](N)[C@H]1NC(C)=O',
+    category: 'Kháng virus',
+    description: 'Hoạt chất ức chế neuraminidase chống virus cúm.',
+  },
+  {
+    id: 'quinine',
+    name: 'Quinine',
+    smiles: 'COc1ccc2nccc([C@@H](O)[C@@H]3CC4CCN3CC4C=C)c2c1',
+    category: 'Alkaloid',
+    description: 'Phân tử đa vòng kinh điển chiết xuất từ vỏ cây canh-ki-na.',
+  },
+  {
+    id: 'cinnamaldehyde',
+    name: 'Cinnamaldehyde',
+    smiles: 'O=CC=Cc1ccccc1',
+    category: 'Hương liệu',
+    description: 'Hợp chất tạo mùi thơm ấm đặc trưng của tinh dầu quế.',
+  },
+  {
+    id: 'menthol',
+    name: 'Menthol',
+    smiles: 'CC1CCC(C(C)C)C(O)C1',
+    category: 'Terpenoid',
+    description: 'Vòng cyclohexane mang lại cảm giác mát lạnh bạc hà.',
+  },
+  {
+    id: 'fluoxetine',
+    name: 'Fluoxetine',
+    smiles: 'CNCCC(Oc1ccc(C(F)(F)F)cc1)c2ccccc2',
+    category: 'Dược phẩm',
+    description: 'Phân tử nổi bật với cụm ba nguyên tử Flo (-CF3).',
   },
 ];
 
@@ -740,11 +873,77 @@ export function parseSmilesToWeapon(
     else if (aromaticAtoms >= 6) archetype = 'Aromatic Chakram';
     else if (hbd + hba >= 4) archetype = 'Bio-Staff';
 
-    const hp = Math.round(120 + Math.min(mw * 0.16, 70));
+    const hp = Math.round(260 + Math.min(mw * 0.34, 150));
     const atk = Math.round(14 + Math.min(Math.max(logp * 3.2, 3), 16));
-    const def = Math.round(Math.min(hbd + hba, 12) * 1.5 + ringCount * 2);
+    const def = Math.round(Math.min(hbd + hba, 12) * 1.8 + ringCount * 2.5);
     const spd = Math.round(Math.max(85, Math.min(125, 118 - mw * 0.08)));
     const crit = Math.round(Math.min(30, 8 + aromaticAtoms * 1.5 + ringCount * 3));
+
+    const hasHalogen =
+      (elemCounts['F'] ?? 0) +
+        (elemCounts['Cl'] ?? 0) +
+        (elemCounts['Br'] ?? 0) +
+        (elemCounts['I'] ?? 0) >
+      0;
+    const hasSulfurOrPhosphorus = (elemCounts['S'] ?? 0) + (elemCounts['P'] ?? 0) > 0;
+    const nitrogenCount = elemCounts['N'] ?? 0;
+
+    let skill: SmilesSkillInfo;
+    if (hasHalogen) {
+      skill = {
+        id: 'halogen_corrode',
+        name: 'Ăn Mòn Halogen',
+        shortLabel: 'Xuyên Khiên',
+        description: 'Phóng tia plasma halogen xuyên phá hoàn toàn khiên đỡ!',
+        accentHex: '#4ade80',
+        cooldown: 5.5,
+      };
+    } else if (hasSulfurOrPhosphorus) {
+      skill = {
+        id: 'sulfur_cage',
+        name: 'Lưới Lưu Huỳnh',
+        shortLabel: 'Khoá S-S',
+        description: 'Bắn cầu disulfua trói choáng sâu đối thủ trên sàn!',
+        accentHex: '#2dd4bf',
+        cooldown: 6.0,
+      };
+    } else if (nitrogenCount >= 1 && (ringCount >= 2 || (aromaticAtoms >= 5 && nitrogenCount >= 2))) {
+      skill = {
+        id: 'alkaloid_surge',
+        name: 'Xung Kích Alkaloid',
+        shortLabel: 'Xung Kích N',
+        description: 'Lao tốc độ cao gây choáng & tăng tốc đánh 4 giây!',
+        accentHex: '#f59e0b',
+        cooldown: 5.5,
+      };
+    } else if (hbd >= 2 || (hba >= 4 && ringCount === 0 && mw > 100)) {
+      skill = {
+        id: 'phenol_shield',
+        name: 'Màng Chắn Phenol',
+        shortLabel: 'Hồi +28 HP',
+        description: 'Tạo khiên chống oxy hoá đẩy lùi địch & hồi +28 HP!',
+        accentHex: '#34d399',
+        cooldown: 6.5,
+      };
+    } else if (aromaticAtoms >= 5 || ringCount >= 1) {
+      skill = {
+        id: 'aromatic_burst',
+        name: 'Cộng Hưởng Thơm',
+        shortLabel: 'Sóng Vòng π',
+        description: 'Phóng vòng cộng hưởng electron π tầm xa chí mạng!',
+        accentHex: '#38bdf8',
+        cooldown: 5.5,
+      };
+    } else {
+      skill = {
+        id: 'carbonyl_chain',
+        name: 'Phản Ứng Chuỗi',
+        shortLabel: 'Hất Chuỗi',
+        description: 'Bùng nổ dây chuyền hất tung đối thủ để nối combo!',
+        accentHex: '#fb7185',
+        cooldown: 5.0,
+      };
+    }
 
     const presetMatch = DRUG_PRESETS.find((p) => p.smiles === smiles);
     const resolvedName = displayName || presetMatch?.name || formula;
@@ -771,6 +970,7 @@ export function parseSmilesToWeapon(
         spd,
         crit,
         archetype,
+        skill,
       },
       svg2d,
     };
